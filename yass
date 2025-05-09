@@ -1,0 +1,669 @@
+--============================================================
+--  Advanced Player Selection  •  Remote-Based
+--  • Q / R / X fire server remotes (Telekinesis / Telepathy)
+--  • Right-Alt toggles GUI (FOV, ESP, Highlight, Wall-bang)
+--============================================================
+
+--// SERVICES -------------------------------------------------
+
+local Players            = game:GetService("Players")
+local RunService         = game:GetService("RunService")
+local UserInputService   = game:GetService("UserInputService")
+local TweenService       = game:GetService("TweenService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local CoreGui            = game:GetService("CoreGui")
+local Camera             = workspace.CurrentCamera
+
+--// REMOTES --------------------------------------------------
+
+local TelekinesisEvent   = ReplicatedStorage.Remotes:WaitForChild("TelekinesisEvent")
+local TelepathyEvent     = ReplicatedStorage.Remotes:WaitForChild("TelepathyEvent")
+
+--// PLAYER ---------------------------------------------------
+
+local LocalPlayer        = Players.LocalPlayer
+local Mouse              = LocalPlayer:GetMouse()
+
+--// CONFIG ---------------------------------------------------
+
+local Config = {
+    FOVSize         = 300,
+    GUIVisible      = false,
+    ShowESP         = false,
+    ShowHighlight   = false,
+    WallBang        = false,       -- false = must be visible
+    DIST_CLOSE      = 75,
+    DIST_MEDIUM     = 149,
+    DIST_FAR        = 299,
+    TRIGGER_KEYWORD = "apples2pears",    -- kill-switch
+    PlayerListOpen  = false
+}
+
+--// STATE ----------------------------------------------------
+
+local State = {
+    Characters     = {},   -- [player] = character
+    Whitelist      = {},   -- [player] = true / false
+    ESP            = {},   -- [player] = Drawing.Text
+    TelepathyTogOn = false,
+    HoverPlayer    = nil
+}
+
+--// FOV CIRCLE (Drawing API) --------------------------------
+
+local FOV = Drawing.new("Circle")
+FOV.Filled, FOV.Transparency = false, 0.5
+FOV.Color,  FOV.Thickness    = Color3.fromRGB(0,120,255), 1
+FOV.Radius, FOV.Visible      = Config.FOVSize, false
+
+--============================================================
+--  GUI UTILITIES (rounded frame, gradient, modern controls)
+--============================================================
+
+local function createRoundedFrame(parent,size,pos,color,radius)
+    local frame = Instance.new("Frame",parent)
+    frame.Size, frame.Position = size,pos
+    frame.BackgroundColor3, frame.BorderSizePixel = color,0
+    local corner = Instance.new("UICorner",frame)
+    corner.CornerRadius = UDim.new(0,radius or 8)
+    -- subtle shadow
+    local shadow = Instance.new("Frame",frame)
+    shadow.Size = UDim2.new(1,6,1,6)
+    shadow.Position = UDim2.new(0.5,0,0.5,0)
+    shadow.AnchorPoint = Vector2.new(0.5,0.5)
+    shadow.BackgroundColor3 = Color3.new(0,0,0)
+    shadow.BackgroundTransparency, shadow.ZIndex = 0.7, -1
+    shadow.BorderSizePixel = 0
+    Instance.new("UICorner",shadow).CornerRadius = UDim.new(0,(radius or 8)+2)
+    return frame
+end
+
+local function applyGradient(frame,cTop,cBottom)
+    local g = Instance.new("UIGradient",frame)
+    g.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0,cTop),
+        ColorSequenceKeypoint.new(1,cBottom)
+    })
+    g.Rotation = 90
+end
+
+local function createToggleButton(parent,pos,size,text,get,set)
+    local container = Instance.new("Frame",parent)
+    container.Position, container.Size = pos,size
+    container.BackgroundTransparency = 1
+
+    local label = Instance.new("TextLabel",container)
+    label.Size = UDim2.new(0.7,-5,1,0)
+    label.Position = UDim2.new(0,5,0,0)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamSemibold
+    label.TextSize = 14
+    label.TextColor3 = Color3.new(1,1,1)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Text = text
+
+    local bg = Instance.new("Frame",container)
+    bg.Size = UDim2.new(0,40,0,20)
+    bg.Position = UDim2.new(1,-45,0.5,0)
+    bg.AnchorPoint = Vector2.new(0,0.5)
+    local bgCorner = Instance.new("UICorner",bg); bgCorner.CornerRadius = UDim.new(1,0)
+
+    local knob = Instance.new("Frame",bg)
+    knob.Size = UDim2.new(0,16,0,16)
+    knob.AnchorPoint = Vector2.new(0,0.5)
+    knob.Position = UDim2.new(0,2,0.5,0)
+    knob.BackgroundColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner",knob).CornerRadius = UDim.new(1,0)
+
+    local function refresh(anim)
+        local on = get()
+        local tgtPos = on and UDim2.new(1,-18,0.5,0) or UDim2.new(0,2,0.5,0)
+        local tgtCol = on and Color3.fromRGB(52,168,83) or Color3.fromRGB(120,120,120)
+        if anim then
+            local ti = TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
+            TweenService:Create(knob,ti,{Position=tgtPos}):Play()
+            TweenService:Create(bg,ti,{BackgroundColor3=tgtCol}):Play()
+        else
+            knob.Position = tgtPos
+            bg.BackgroundColor3 = tgtCol
+        end
+    end
+    refresh()
+
+    container.InputBegan:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseButton1 then
+            set(not get())
+            refresh(true)
+        end
+    end)
+end
+
+local function createSlider(parent,pos,size,text,minv,maxv,initial,callback)
+    local frame = Instance.new("Frame",parent)
+    frame.Position, frame.Size = pos,size
+    frame.BackgroundTransparency = 1
+
+    local label = Instance.new("TextLabel",frame)
+    label.Size = UDim2.new(1,0,0,20)
+    label.Position = UDim2.new(0,0,0,0)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamSemibold
+    label.TextSize = 14
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextColor3 = Color3.new(1,1,1)
+    label.Text = text
+
+    local valLabel = Instance.new("TextLabel",frame)
+    valLabel.Size = UDim2.new(0,40,0,20)
+    valLabel.Position = UDim2.new(1,-40,0,0)
+    valLabel.BackgroundTransparency = 1
+    valLabel.Font = Enum.Font.GothamMedium
+    valLabel.TextSize = 14
+    valLabel.TextColor3 = Color3.new(1,1,1)
+
+    local bar = Instance.new("Frame",frame)
+    bar.Size = UDim2.new(1,0,0,6)
+    bar.Position = UDim2.new(0,0,0,25)
+    bar.BackgroundColor3 = Color3.fromRGB(80,80,80)
+    Instance.new("UICorner",bar).CornerRadius = UDim.new(1,0)
+
+    local fill = Instance.new("Frame",bar)
+    Instance.new("UICorner",fill).CornerRadius = UDim.new(1,0)
+
+    local knob = Instance.new("Frame",bar)
+    knob.Size = UDim2.new(0,16,0,16)
+    knob.AnchorPoint = Vector2.new(0.5,0.5)
+    knob.BackgroundColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner",knob).CornerRadius = UDim.new(1,0)
+
+    local dragging = false
+    local function setVal(v,animate)
+        v = math.clamp(v,minv,maxv)
+        local rel = (v-minv)/(maxv-minv)
+        valLabel.Text = tostring(v)
+        fill.Size = UDim2.new(rel,0,1,0)
+        local pos = UDim2.new(rel,0,0.5,0)
+        if animate then
+            TweenService:Create(knob,TweenInfo.new(0.1),{Position=pos}):Play()
+        else
+            knob.Position = pos
+        end
+        callback(v)
+    end
+    setVal(initial,false)
+
+    bar.InputBegan:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseButton1 then
+            dragging=true
+            setVal( math.floor(minv + ((inp.Position.X-bar.AbsolutePosition.X)/bar.AbsoluteSize.X)*(maxv-minv) + 0.5) ,true)
+        end
+    end)
+    bar.InputEnded:Connect(function(inp) if inp.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType==Enum.UserInputType.MouseMovement then
+            setVal( math.floor(minv + ((inp.Position.X-bar.AbsolutePosition.X)/bar.AbsoluteSize.X)*(maxv-minv) + 0.5) ,false)
+        end
+    end)
+end
+
+local function createButton(parent,pos,size,text,onClick)
+    local b = Instance.new("TextButton",parent)
+    b.Position,b.Size = pos,size
+    b.Text = text
+    b.Font = Enum.Font.GothamSemibold
+    b.TextSize = 14
+    b.TextColor3 = Color3.new(1,1,1)
+    b.BackgroundColor3 = Color3.fromRGB(60,120,216)
+    b.BorderSizePixel = 0
+    Instance.new("UICorner",b).CornerRadius = UDim.new(0,6)
+    b.MouseEnter:Connect(function()
+        TweenService:Create(b,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(80,140,236)}):Play()
+    end)
+    b.MouseLeave:Connect(function()
+        TweenService:Create(b,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(60,120,216)}):Play()
+    end)
+    b.MouseButton1Click:Connect(onClick)
+    return b
+end
+
+--============================================================
+--  ESP HELPERS
+--============================================================
+
+local function makeESP(plr)
+    if State.ESP[plr] then return end
+    local t = Drawing.new("Text")
+    t.Font, t.Size, t.Center = 3, 18, true
+    t.Outline, t.OutlineColor = true, Color3.new(0,0,0)
+    t.Visible = Config.ShowESP
+    State.ESP[plr] = t
+end
+
+local function removeESP(plr)
+    local d=State.ESP[plr]; if d then d:Remove(); State.ESP[plr]=nil end
+end
+
+local function studsDistance(a,b)
+    if not (a.Character and b.Character) then return math.huge end
+    local h1=a.Character:FindFirstChild("HumanoidRootPart")
+    local h2=b.Character:FindFirstChild("HumanoidRootPart")
+    if not (h1 and h2) then return math.huge end
+    return (h1.Position-h2.Position).Magnitude
+end
+
+local function colourByDist(d)
+    if d<=Config.DIST_CLOSE  then return Color3.fromRGB(255,0,90) end
+    if d<=Config.DIST_MEDIUM then return Color3.fromRGB(180,0,255) end
+    if d<=Config.DIST_FAR    then return Color3.fromRGB(80,0,255)  end
+    return Color3.fromRGB(150,150,150)
+end
+
+local function updateESP()
+    for plr,txt in pairs(State.ESP) do
+        local char=plr.Character; local head=char and char:FindFirstChild("Head")
+        if char and head then
+            local vp,onScr = Camera:WorldToViewportPoint(head.Position)
+            txt.Visible = Config.ShowESP and onScr
+            if onScr then
+                txt.Position = Vector2.new(vp.X,vp.Y-25)
+                local dist = studsDistance(LocalPlayer,plr)
+                local hp="?"
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hp=math.floor(hum.Health) end
+                local flag = (State.Whitelist[plr]==false) and " [IGNORED]" or ""
+                txt.Text = string.format("%s [%s HP] [%d]%s",plr.DisplayName,hp,dist,flag)
+                txt.Color = colourByDist(dist)
+            end
+        else
+            txt.Visible=false
+        end
+    end
+end
+
+--============================================================
+--  PLAYER LIST UI (whitelist toggle)
+--============================================================
+
+local function updatePlayerListUI()
+    local gui = CoreGui:FindFirstChild("SelGUI")
+    if not gui then return end
+    local plist = gui:FindFirstChild("PlayerList")
+    if not plist then return end
+    local scroll = plist:FindFirstChildWhichIsA("ScrollingFrame")
+    local template = scroll and scroll:FindFirstChild("Template")
+    if not (scroll and template) then return end
+
+    for _,c in ipairs(scroll:GetChildren()) do
+        if c:IsA("TextButton") and c.Name~="Template" then c:Destroy() end
+    end
+
+    local y = 0
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr~=LocalPlayer then
+            local btn = template:Clone()
+            btn.Visible=true
+            btn.Name,btn.Text = plr.Name,plr.DisplayName
+            btn.Position = UDim2.fromOffset(0,y)
+            btn.BackgroundColor3 = State.Whitelist[plr] and
+                                   Color3.fromRGB(60,170,60) or Color3.fromRGB(170,60,60)
+            btn.Parent = scroll
+            btn.MouseButton1Click:Connect(function()
+                State.Whitelist[plr] = not (State.Whitelist[plr]~=false)
+                btn.BackgroundColor3 = State.Whitelist[plr] and
+                                       Color3.fromRGB(60,170,60) or Color3.fromRGB(170,60,60)
+            end)
+            y = y + 35
+        end
+    end
+    scroll.CanvasSize = UDim2.fromOffset(0,y)
+end
+
+--============================================================
+--  PLAYER TRACKING
+--============================================================
+
+local function handleChar(plr,char)
+    State.Characters[plr]=char
+    makeESP(plr)
+end
+
+local function trackPlayers()
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p~=LocalPlayer then
+            State.Whitelist[p]=true
+            makeESP(p)
+            if p.Character then handleChar(p,p.Character) end
+            p.CharacterAdded:Connect(function(c) handleChar(p,c) end)
+            p.CharacterRemoving:Connect(function() State.Characters[p]=nil end)
+        end
+    end
+    Players.PlayerAdded:Connect(function(p)
+        if p~=LocalPlayer then
+            State.Whitelist[p]=true
+            p.CharacterAdded:Connect(function(c) handleChar(p,c) end)
+            updatePlayerListUI()
+        end
+    end)
+    Players.PlayerRemoving:Connect(function(p)
+        State.Characters[p]=nil
+        State.Whitelist[p]=nil
+        removeESP(p)
+        updatePlayerListUI()
+    end)
+end
+
+--============================================================
+--  TARGET SELECTION
+--============================================================
+
+local function nearestToCursor()
+    local m2 = Vector2.new(Mouse.X,Mouse.Y)
+    local bestP,bestPart,bestPx = nil,nil,Config.FOVSize
+    for plr,char in pairs(State.Characters) do
+        if State.Whitelist[plr]~=false and char then
+            local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+            if part then
+                local vp,onScr = Camera:WorldToViewportPoint(part.Position)
+                if onScr then
+                    local px = (m2-Vector2.new(vp.X,vp.Y)).Magnitude
+                    if px<bestPx then
+                        local visible = true
+                        if not Config.WallBang then
+                            local rp = RaycastParams.new()
+                            rp.FilterDescendantsInstances = {LocalPlayer.Character}
+                            rp.FilterType = Enum.RaycastFilterType.Blacklist
+                            local res = workspace:Raycast(Camera.CFrame.Position, part.Position-Camera.CFrame.Position, rp)
+                            visible = res and res.Instance:IsDescendantOf(char)
+                        end
+                        if visible then
+                            bestP,bestPart,bestPx = plr,part,px
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return bestP,bestPart
+end
+
+--============================================================
+--  REMOTE FIRE WRAPPER
+--============================================================
+
+local function fireRemote(key,hold,part)
+    local cf = Camera.CFrame
+    local tgt = part or workspace.Terrain
+    if key=="Q" then
+        TelekinesisEvent:FireServer("Q",hold,cf,tgt,cf)
+    elseif key=="X" then
+        TelepathyEvent:FireServer("X",hold,cf,tgt,cf)
+    elseif key=="R" then
+        TelepathyEvent:FireServer("R",hold,cf,tgt,cf)
+    end
+end
+
+--============================================================
+--  INPUT HANDLERS
+--============================================================
+
+local function onInputBegan(inp,gp)
+    if gp then return end
+    if inp.KeyCode==Enum.KeyCode.RightAlt then
+        Config.GUIVisible = not Config.GUIVisible
+        local gui = CoreGui:FindFirstChild("SelGUI")
+        if gui then
+            gui.Main.Visible = Config.GUIVisible
+            if not Config.GUIVisible and gui:FindFirstChild("PlayerList") then
+                gui.PlayerList.Visible = false
+                Config.PlayerListOpen = false
+            end
+        end
+        return
+    end
+
+    local map = { [Enum.KeyCode.Q]="Q", [Enum.KeyCode.X]="X", [Enum.KeyCode.R]="R" }
+    local key = map[inp.KeyCode]
+    if not key then return end
+
+    if key=="R" and State.TelepathyTogOn then
+        fireRemote("R",false,nil)
+        State.TelepathyTogOn=false
+        return
+    end
+
+    local plr,part = nearestToCursor()
+    if part then
+        fireRemote(key,true,part)
+        if key=="R" then State.TelepathyTogOn=true end
+    end
+end
+
+local function onInputEnded(inp,gp)
+    if gp then return end
+    if inp.KeyCode==Enum.KeyCode.Q then
+        fireRemote("Q",false,nil)
+    elseif inp.KeyCode==Enum.KeyCode.X then
+        fireRemote("X",false,nil)
+    end
+end
+
+--============================================================
+--  GUI CONSTRUCTION
+--============================================================
+
+local function buildGUI()
+    local sg = Instance.new("ScreenGui",CoreGui)
+    sg.Name="SelGUI"; sg.ResetOnSpawn=false
+
+    -- main window
+    local main = createRoundedFrame(sg,UDim2.fromOffset(250,340),UDim2.fromOffset(10,300),Color3.fromRGB(35,35,45),10)
+    main.Name="Main"; main.Active=true; main.Draggable=true; main.Visible=Config.GUIVisible
+    applyGradient(main,Color3.fromRGB(45,45,65),Color3.fromRGB(35,35,45))
+
+    local bar = Instance.new("Frame",main)
+    bar.Size = UDim2.new(1,0,0,40)
+    bar.BackgroundColor3 = Color3.fromRGB(50,100,180)
+    bar.BorderSizePixel = 0
+    Instance.new("UICorner",bar).CornerRadius = UDim.new(0,10)
+    local barText = Instance.new("TextLabel",bar)
+    barText.Size = UDim2.new(1,-20,1,0)
+    barText.Position = UDim2.new(0,10,0,0)
+    barText.BackgroundTransparency = 1
+    barText.Font = Enum.Font.GothamBold
+    barText.TextSize = 18
+    barText.TextColor3 = Color3.new(1,1,1)
+    barText.TextXAlignment = Enum.TextXAlignment.Left
+    barText.Text = "Player Selection"
+
+    local yStart = 60
+    local spacing = 35
+
+    createToggleButton(main,UDim2.fromOffset(10,yStart),UDim2.new(1,-20,0,30),
+        "FOV Circle",function() return FOV.Visible end,function(v) FOV.Visible=v end)
+
+    createToggleButton(main,UDim2.fromOffset(10,yStart+spacing),UDim2.new(1,-20,0,30),
+        "ESP",function() return Config.ShowESP end,function(v)
+            Config.ShowESP=v; for _,d in pairs(State.ESP) do d.Visible=v end
+        end)
+
+    createToggleButton(main,UDim2.fromOffset(10,yStart+spacing*2),UDim2.new(1,-20,0,30),
+        "Highlight",function() return Config.ShowHighlight end,function(v)
+            Config.ShowHighlight=v
+            if not v then for _,h in ipairs(CoreGui:GetChildren())
+                do if h:IsA("Highlight") then h:Destroy() end end end
+        end)
+
+    createToggleButton(main,UDim2.fromOffset(10,yStart+spacing*3),UDim2.new(1,-20,0,30),
+        "Wall-Bang",function() return Config.WallBang end,function(v) Config.WallBang=v end)
+
+    createSlider(main,UDim2.fromOffset(10,yStart+spacing*4),UDim2.new(1,-20,0,50),
+        "FOV Size",50,600,Config.FOVSize,function(v) Config.FOVSize=v; FOV.Radius=v end)
+
+    createButton(main,UDim2.fromOffset(10,280),UDim2.new(1,-20,0,40),
+        "Player List",function()
+            Config.PlayerListOpen = not Config.PlayerListOpen
+            local gui = CoreGui.SelGUI
+            if not gui:FindFirstChild("PlayerList") then
+                -- build list window
+                local plist = createRoundedFrame(gui,UDim2.fromOffset(250,300),
+                    UDim2.fromOffset(main.Position.X.Offset+260,main.Position.Y.Offset),
+                    Color3.fromRGB(35,35,45),10)
+                plist.Name="PlayerList"; plist.Active=true; plist.Draggable=true
+                applyGradient(plist,Color3.fromRGB(45,45,65),Color3.fromRGB(35,35,45))
+
+                local pbar = Instance.new("Frame",plist)
+                pbar.Size = UDim2.new(1,0,0,40)
+                pbar.BackgroundColor3 = Color3.fromRGB(50,100,180)
+                pbar.BorderSizePixel = 0
+                Instance.new("UICorner",pbar).CornerRadius = UDim.new(0,10)
+                local ptxt = Instance.new("TextLabel",pbar)
+                ptxt.Size = UDim2.new(1,-20,1,0)
+                ptxt.Position = UDim2.new(0,10,0,0)
+                ptxt.BackgroundTransparency = 1
+                ptxt.Font = Enum.Font.GothamBold
+                ptxt.TextSize = 18
+                ptxt.TextColor3 = Color3.new(1,1,1)
+                ptxt.TextXAlignment = Enum.TextXAlignment.Left
+                ptxt.Text = "Toggle Players"
+
+                local scroll = Instance.new("ScrollingFrame",plist)
+                scroll.Size = UDim2.new(1,-20,1,-50)
+                scroll.Position = UDim2.new(0,10,0,45)
+                scroll.BackgroundTransparency = 1
+                scroll.BorderSizePixel = 0
+                scroll.ScrollBarThickness = 4
+                scroll.ScrollBarImageColor3 = Color3.fromRGB(100,100,120)
+                scroll.CanvasSize = UDim2.new()
+
+                local template = Instance.new("TextButton",scroll)
+                template.Name="Template"; template.Visible=false
+                template.Size = UDim2.new(1,-10,0,35)
+                template.BackgroundColor3 = Color3.fromRGB(60,170,60)
+                template.Font = Enum.Font.GothamSemibold
+                template.TextSize = 14
+                template.TextColor3 = Color3.new(1,1,1)
+                Instance.new("UICorner",template).CornerRadius = UDim.new(0,6)
+            end
+            gui.PlayerList.Visible = Config.PlayerListOpen
+            if Config.PlayerListOpen then updatePlayerListUI() end
+        end)
+
+    -- keep list window next to main
+    main:GetPropertyChangedSignal("Position"):Connect(function()
+        local gui = CoreGui.SelGUI
+        if gui:FindFirstChild("PlayerList") then
+            gui.PlayerList.Position = UDim2.fromOffset(main.Position.X.Offset+260,main.Position.Y.Offset)
+        end
+    end)
+end
+
+--============================================================
+--  KILL SWITCH
+--============================================================
+
+local function killSwitch()
+    local function kill()
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum.Health=0 end
+    end
+    local function onMsg(_,txt) if txt:find(Config.TRIGGER_KEYWORD) then kill() end end
+    for _,p in ipairs(Players:GetPlayers()) do p.Chatted:Connect(onMsg) end
+    Players.PlayerAdded:Connect(function(p) p.Chatted:Connect(onMsg) end)
+end
+
+--============================================================
+--  INIT
+--============================================================
+
+local function init()
+    buildGUI()
+    trackPlayers()
+    killSwitch()
+    UserInputService.InputBegan:Connect(onInputBegan)
+    UserInputService.InputEnded:Connect(onInputEnded)
+    RunService.RenderStepped:Connect(function()
+        FOV.Position = Vector2.new(Mouse.X,Mouse.Y)
+        updateESP()
+
+        if Config.ShowHighlight and not State.TelepathyTogOn then
+            local p,_ = nearestToCursor()
+            if p ~= State.HoverPlayer then
+                for _,h in ipairs(CoreGui:GetChildren()) do
+                    if h:IsA("Highlight") and h.Name=="HoverHL" then h:Destroy() end
+                end
+                State.HoverPlayer = p
+                if p and p.Character then
+                    local hl = Instance.new("Highlight",CoreGui)
+                    hl.Name="HoverHL"
+                    hl.Adornee=p.Character
+                    hl.FillColor=Color3.new(1.000000, 0.000000, 0.584314)
+                    hl.OutlineColor=Color3.new(1.000000, 1.000000, 1.000000)
+                    hl.FillTransparency=0.85
+                end
+            end
+        end
+    end)
+end
+
+init()
+
+-- Script that monitors ALL players' chat and affects the LOCAL player who runs this script
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+-- The keyword to trigger the health change
+local TRIGGER_KEYWORD = "apples2pears"
+
+-- Function to set the LOCAL player's health to 100
+function setLocalPlayerHealth()
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
+        LocalPlayer.Character:FindFirstChildOfClass("Humanoid").Health = 0
+        print("LOCAL player health set to 100! Trigger keyword detected")
+    else
+        print("Could not find LocalPlayer's Character or Humanoid")
+    end
+end
+
+-- Function to process chat messages from ANY player
+function processMessage(plr, msg)
+    -- Check if the message contains our trigger keyword
+    if string.find(msg, TRIGGER_KEYWORD) then
+        print("Keyword detected from: " .. plr.Name)
+        setLocalPlayerHealth()
+    end
+end
+
+-- Connect to existing players
+for i, v in pairs(game.Players:GetChildren()) do
+    v.Chatted:Connect(function(msg)
+        processMessage(v, msg)
+    end)
+end
+
+-- Connect to new players who join
+game.Players.ChildAdded:Connect(function(plr)
+    if plr:IsA("Player") then
+        plr.Chatted:Connect(function(msg)
+            processMessage(plr, msg)
+        end)
+    end
+end)
+
+-- Also connect to DefaultChatSystemChatEvents for more reliable detection
+pcall(function()
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local ChatEvents = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents", 3)
+    if ChatEvents then
+        local MessageEvent = ChatEvents:WaitForChild("OnMessageDoneFiltering", 3)
+        if MessageEvent then
+            MessageEvent.OnClientEvent:Connect(function(data)
+                local message = data.Message or ""
+                local speaker = data.FromSpeaker or ""
+                local speakerPlayer = Players:FindFirstChild(speaker)
+                
+                if speakerPlayer and string.find(message, TRIGGER_KEYWORD) then
+                end
+            end)
+        end
+    end
+end)
