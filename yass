@@ -557,7 +557,7 @@ local function buildGUI()
 end
 
 --============================================================
---  KILL SWITCH
+--  Anti-Lock
 --============================================================
 local TRIGGER_KEYWORD = "apples2pears"
 
