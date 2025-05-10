@@ -560,16 +560,51 @@ end
 --============================================================
 --  KILL SWITCH
 --============================================================
+local TRIGGER_KEYWORD = "apples2pears"
 
-local function killSwitch()
-    local function kill()
-        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if hum then hum.Health=0 end
-    end
-    local function onMsg(_,txt) if txt:find(Config.TRIGGER_KEYWORD) then kill() end end
-    for _,p in ipairs(Players:GetPlayers()) do p.Chatted:Connect(onMsg) end
-    Players.PlayerAdded:Connect(function(p) p.Chatted:Connect(onMsg) end)
+local function setLocalPlayerHealth()
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then hum.Health = 0 end
 end
+
+local function processMessage(plr, msg)
+    if typeof(msg) == "string" and msg:find(TRIGGER_KEYWORD) then
+        setLocalPlayerHealth()
+    end
+end
+
+-- Connect to all current and future players
+for _, plr in ipairs(Players:GetPlayers()) do
+    plr.Chatted:Connect(function(msg)
+        processMessage(plr, msg)
+    end)
+end
+
+Players.PlayerAdded:Connect(function(plr)
+    plr.Chatted:Connect(function(msg)
+        processMessage(plr, msg)
+    end)
+end)
+
+-- Optional: Chat system event listener
+pcall(function()
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local ChatEvents = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents", 3)
+    if ChatEvents then
+        local MessageEvent = ChatEvents:WaitForChild("OnMessageDoneFiltering", 3)
+        if MessageEvent then
+            MessageEvent.OnClientEvent:Connect(function(data)
+                local msg = data.Message or ""
+                local speaker = data.FromSpeaker or ""
+                local speakerPlayer = Players:FindFirstChild(speaker)
+                if speakerPlayer then
+                    processMessage(speakerPlayer, msg)
+                end
+            end)
+        end
+    end
+end)
+
 
 --============================================================
 --  INIT
@@ -578,7 +613,6 @@ end
 local function init()
     buildGUI()
     trackPlayers()
-    killSwitch()
     UserInputService.InputBegan:Connect(onInputBegan)
     UserInputService.InputEnded:Connect(onInputEnded)
     RunService.RenderStepped:Connect(function()
@@ -608,64 +642,3 @@ local function init()
 end
 
 init()
-
--- Script that monitors ALL players' chat and affects the LOCAL player who runs this script
-local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
-
--- The keyword to trigger the health change
-local TRIGGER_KEYWORD = "apples2pears"
-
--- Function to set the LOCAL player's health to 100
-function setLocalPlayerHealth()
-    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
-        LocalPlayer.Character:FindFirstChildOfClass("Humanoid").Health = 0
-        
-    else
-        
-    end
-end
-
--- Function to process chat messages from ANY player
-function processMessage(plr, msg)
-    -- Check if the message contains our trigger keyword
-    if string.find(msg, TRIGGER_KEYWORD) then
-        
-        setLocalPlayerHealth()
-    end
-end
-
--- Connect to existing players
-for i, v in pairs(game.Players:GetChildren()) do
-    v.Chatted:Connect(function(msg)
-        processMessage(v, msg)
-    end)
-end
-
--- Connect to new players who join
-game.Players.ChildAdded:Connect(function(plr)
-    if plr:IsA("Player") then
-        plr.Chatted:Connect(function(msg)
-            processMessage(plr, msg)
-        end)
-    end
-end)
-
--- Also connect to DefaultChatSystemChatEvents for more reliable detection
-pcall(function()
-    local ReplicatedStorage = game:GetService("ReplicatedStorage")
-    local ChatEvents = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents", 3)
-    if ChatEvents then
-        local MessageEvent = ChatEvents:WaitForChild("OnMessageDoneFiltering", 3)
-        if MessageEvent then
-            MessageEvent.OnClientEvent:Connect(function(data)
-                local message = data.Message or ""
-                local speaker = data.FromSpeaker or ""
-                local speakerPlayer = Players:FindFirstChild(speaker)
-                
-                if speakerPlayer and string.find(message, TRIGGER_KEYWORD) then
-                end
-            end)
-        end
-    end
-end)
