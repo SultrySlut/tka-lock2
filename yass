@@ -35,7 +35,6 @@ local Config = {
     DIST_CLOSE      = 75,
     DIST_MEDIUM     = 149,
     DIST_FAR        = 299,
-    TRIGGER_KEYWORD = "apples2pears",    -- kill-switch
     PlayerListOpen  = false
 }
 
