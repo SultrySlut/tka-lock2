@@ -1,0 +1,202 @@
+--============================================================
+--  Quad-Spell Toggle Script  (cursor colour shows active spell)
+--
+--  • Cycle spells with RIGHT-click:
+--        1) Amaurotic Lambent  – Light AOE at cursor hit-point
+--        2) Lightning Barrage  – vertical column on player
+--                                whose HRP is nearest cursor
+--        3) Gravital Globe     – gravity field on that player
+--        4) Refraction         – Illusion beam that *starts* and
+--                                *ends* on the player whose HRP
+--                                is nearest cursor (no more beam
+--                                from you to them)
+--
+--  • LEFT-click casts whichever spell is active.
+--
+--  • Cursor-circle colours:
+--        Yellow  = Lambent
+--        Cyan    = Barrage
+--        Purple  = Globe
+--        Pink    = Refraction
+--============================================================
+
+--------------------  SERVICES  ------------------------------
+
+local Players            = game:GetService("Players")
+local UserInputService   = game:GetService("UserInputService")
+local RunService         = game:GetService("RunService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local Workspace          = game:GetService("Workspace")
+
+--------------------  REMOTES   ------------------------------
+
+local DoClientMagic = ReplicatedStorage.Remotes:WaitForChild("DoClientMagic")
+local DoMagic       = ReplicatedStorage.Remotes:WaitForChild("DoMagic")
+
+--------------------  PLAYER    ------------------------------
+
+local LocalPlayer  = Players.LocalPlayer
+local Mouse        = LocalPlayer:GetMouse()
+local Character    = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local HRP          = Character:WaitForChild("HumanoidRootPart")
+local Camera       = Workspace.CurrentCamera
+
+--------------------  CONFIG    ------------------------------
+
+local CHARGE_LAMBENT  = 0.15
+local CHARGE_BARRAGE  = 1.50
+local CHARGE_GLOBE    = 0.15
+local CHARGE_REFRACT  = 0.15
+
+local HEIGHT_OFFSET   = 0      -- column centre offset (Barrage)
+
+local TRIGGER_LEFT    = Enum.UserInputType.MouseButton1
+local TRIGGER_RIGHT   = Enum.UserInputType.MouseButton2
+
+-- Cursor colours
+local COLOR_LAMBENT   = Color3.fromRGB(255, 255, 120)
+local COLOR_BARRAGE   = Color3.fromRGB(100, 255, 255)
+local COLOR_GLOBE     = Color3.fromRGB(200, 120, 255)
+local COLOR_REFRACT   = Color3.fromRGB(255, 150, 200)
+
+--------------------  STATE     ------------------------------
+
+local SPELLS       = { "LAMBENT", "BARRAGE", "GLOBE", "REFRACT" }
+local spellIndex   = 1
+local currentSpell = SPELLS[spellIndex]
+
+--------------------  HELPERS   ------------------------------
+
+local function nearestRootToCursor()
+    local mouse2D = UserInputService:GetMouseLocation()
+    local bestRoot, bestDist = nil, math.huge
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local root = plr.Character:FindFirstChild("HumanoidRootPart")
+            if root then
+                local screenPos, onScreen = Camera:WorldToViewportPoint(root.Position)
+                if onScreen then
+                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - mouse2D).Magnitude
+                    if dist < bestDist then
+                        bestRoot, bestDist = root, dist
+                    end
+                end
+            end
+        end
+    end
+    return bestRoot
+end
+
+--------------------  CASTERS   ------------------------------
+
+-- 1) Amaurotic Lambent
+local function castLambent()
+    if not Mouse or not Mouse.Hit then return end
+    local hitPos = Mouse.Hit.Position
+
+    DoClientMagic:FireServer("Light", "Amaurotic Lambent")
+    task.wait(CHARGE_LAMBENT)
+    DoMagic:InvokeServer("Light", "Amaurotic Lambent", { lastPos = hitPos })
+end
+
+-- 2) Lightning Barrage
+local function castBarrage()
+    local lockedRoot = nearestRootToCursor()
+    if not lockedRoot then return end
+
+    DoClientMagic:FireServer("Storm", "Lightning Barrage")
+    task.wait(CHARGE_BARRAGE)
+
+    local targetRoot = lockedRoot.Parent and lockedRoot or nearestRootToCursor()
+    if not targetRoot then return end
+
+    local basePos = targetRoot.Position + Vector3.new(0, HEIGHT_OFFSET, 0)
+    local dirCF   = CFrame.new(basePos, basePos + Vector3.new(0, 1, 0))
+
+    DoMagic:InvokeServer("Storm", "Lightning Barrage", { Direction = dirCF })
+end
+
+-- 3) Gravital Globe
+local function castGlobe()
+    local lockedRoot = nearestRootToCursor()
+    if not lockedRoot then return end
+
+    DoClientMagic:FireServer("Gravity", "Gravital Globe")
+    task.wait(CHARGE_GLOBE)
+
+    local targetRoot = lockedRoot.Parent and lockedRoot or nearestRootToCursor()
+    if not targetRoot then return end
+
+    DoMagic:InvokeServer("Gravity", "Gravital Globe", { lastPos = targetRoot.Position })
+end
+
+-- 4) Refraction – **beam spawns AND strikes on nearest-cursor player**
+local function castRefract()
+    local lockedRoot = nearestRootToCursor()
+    if not lockedRoot then return end
+
+    DoClientMagic:FireServer("Illusion", "Refraction")
+    task.wait(CHARGE_REFRACT)
+
+    local targetRoot = lockedRoot.Parent and lockedRoot or nearestRootToCursor()
+    if not targetRoot then return end
+
+    -- vertical-look CFrame so start & end are same player
+    local cf = CFrame.new(targetRoot.Position, targetRoot.Position + Vector3.new(0, 1, 0))
+    DoMagic:InvokeServer("Illusion", "Refraction", cf)
+end
+
+-- dispatch
+local CAST = {
+    LAMBENT = castLambent,
+    BARRAGE = castBarrage,
+    GLOBE   = castGlobe,
+    REFRACT = castRefract,
+}
+
+--------------------  VISUAL     -----------------------------
+
+local circle
+pcall(function()
+    circle = Drawing.new("Circle")
+    circle.Visible   = true
+    circle.Thickness = 1
+    circle.Radius    = 10
+    circle.Filled    = false
+    circle.Color     = COLOR_LAMBENT
+
+    RunService.RenderStepped:Connect(function()
+        local pos = UserInputService:GetMouseLocation()
+        circle.Position = Vector2.new(pos.X, pos.Y)
+    end)
+end)
+
+local function updateCircleColour()
+    if not circle then return end
+    if currentSpell == "LAMBENT" then
+        circle.Color = COLOR_LAMBENT
+    elseif currentSpell == "BARRAGE" then
+        circle.Color = COLOR_BARRAGE
+    elseif currentSpell == "GLOBE" then
+        circle.Color = COLOR_GLOBE
+    else
+        circle.Color = COLOR_REFRACT
+    end
+end
+
+--------------------  INPUT      ------------------------------
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+
+    if input.UserInputType == TRIGGER_LEFT then
+        CAST[currentSpell]()
+
+    elseif input.UserInputType == TRIGGER_RIGHT then
+        spellIndex  = spellIndex % #SPELLS + 1
+        currentSpell = SPELLS[spellIndex]
+        updateCircleColour()
+        print("[Spell Switch] Now set to:", currentSpell)
+    end
+end)
