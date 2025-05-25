@@ -1,10 +1,13 @@
 --============================================================
---  Advanced Player Selection  •  Remote-Based
+--  Advanced Player Selection  •  Remote-Based  (v1.2 25-May-2025)
 --  • Q / R / X fire server remotes (Telekinesis / Telepathy)
 --  • Right-Alt toggles GUI (FOV, ESP, Highlight, Wall-Bang)
 --  • ESP element toggles (Name ▢  HP ▢  Studs ▢)
 --  • Per-player memory (saved to file)  +  “Toggle All” switch
 --  • Starts with EVERYONE IGNORED until you choose otherwise
+--  • NEW:  ⟶  “Target All / Ignore All” now applies to *future* joins
+--           and clears saved prefs so players who re-join follow
+--           the currently selected global mode.
 --============================================================
 
 ----------------------------------------------------------------
@@ -57,34 +60,34 @@ local Config = {
 local State = {
     Characters     = {},   -- [player] = character
     Whitelist      = {},   -- [player] = true / false
-    Prefs          = {},   -- [userid]  = true / false
-    ESP            = {},   -- [player]  = Drawing.Text
+    Prefs          = {},   -- [userid] = true / false  (persisted)
+    ESP            = {},   -- [player] = Drawing.Text
     HoverPlayer    = nil,
     TelepathyTogOn = false,
-    AllTargeted    = false -- false = IGNORE ALL   |   true = TARGET ALL
+    AllTargeted    = false -- false = IGNORE-ALL | true = TARGET-ALL
 }
 
 ----------------------------------------------------------------
---  LOCAL-FILE STORAGE  (Synapse / Krnl / Fluxus etc.)
+--  LOCAL-FILE STORAGE  (Synapse / Krnl / Fluxus, etc.)
 ----------------------------------------------------------------
-local STORE = "SelPrefs.json"
-local haveFileAPI = (typeof(isfile)=="function") and (typeof(readfile)=="function") and (typeof(writefile)=="function")
+local STORE       = "SelPrefs.json"
+local haveFileAPI = (typeof(isfile)=="function") and
+                    (typeof(readfile)=="function") and
+                    (typeof(writefile)=="function")
 
 local function savePrefs()
     if not haveFileAPI then return end
-    local data = HttpService:JSONEncode(State.Prefs)
-    pcall(writefile, STORE, data)
+    local ok, data = pcall(HttpService.JSONEncode, HttpService, State.Prefs)
+    if ok and data then pcall(writefile, STORE, data) end
 end
 
 local function loadPrefs()
-    if not haveFileAPI then return end
-    if isfile(STORE) then
-        local ok, raw = pcall(readfile, STORE)
-        if ok and raw and #raw > 0 then
-            local ok2, tbl = pcall(HttpService.JSONDecode, HttpService, raw)
-            if ok2 and typeof(tbl)=="table" then
-                State.Prefs = tbl
-            end
+    if not haveFileAPI or not isfile(STORE) then return end
+    local ok, raw = pcall(readfile, STORE)
+    if ok and raw and #raw > 0 then
+        local ok2, tbl = pcall(HttpService.JSONDecode, HttpService, raw)
+        if ok2 and typeof(tbl)=="table" then
+            State.Prefs = tbl
         end
     end
 end
@@ -384,9 +387,10 @@ end
 --  PLAYER TRACKING
 ----------------------------------------------------------------
 local function applyPrefsOrDefault(plr)
+    -- If no saved preference, fall back to current global mode
     local saved = State.Prefs[plr.UserId]
-    if saved==nil then
-        State.Whitelist[plr] = false -- default IGNORE
+    if saved == nil then
+        State.Whitelist[plr] = State.AllTargeted
     else
         State.Whitelist[plr] = saved
     end
@@ -411,6 +415,7 @@ local function trackPlayers()
     Players.PlayerAdded:Connect(function(p)
         if p~=LocalPlayer then
             applyPrefsOrDefault(p)
+            makeESP(p)
             p.CharacterAdded:Connect(function(c) handleChar(p,c) end)
             updatePlayerListUI()
         end
@@ -418,7 +423,7 @@ local function trackPlayers()
 
     Players.PlayerRemoving:Connect(function(p)
         State.Characters[p] = nil
-        State.Prefs[p.UserId] = State.Whitelist[p]
+        State.Prefs[p.UserId] = State.Whitelist[p]  -- store latest per-player choice
         removeESP(p)
         updatePlayerListUI()
         savePrefs()
@@ -577,7 +582,7 @@ local function buildGUI()
             Config.PlayerListOpen = not Config.PlayerListOpen
             local gui = CoreGui.SelGUI
             if not gui:FindFirstChild("PlayerList") then
-                -- BUILD LIST WINDOW -----------------------------
+                -- LIST WINDOW ---------------------------------
                 local plw = createRoundedFrame(gui, UDim2.fromOffset(250, 340),
                     UDim2.fromOffset(main.Position.X.Offset+280, main.Position.Y.Offset),
                     Color3.fromRGB(35,35,45), 10)
@@ -595,11 +600,19 @@ local function buildGUI()
 
                 GuiRefs.MasterBtn = createButton(plw, UDim2.fromOffset(10,50), UDim2.new(1,-20,0,30),
                     "Target All", function()
+                        -- flip global mode
                         State.AllTargeted = not State.AllTargeted
+
+                        -- CLEAR saved prefs so re-joins follow new global choice
+                        State.Prefs = {}
+                        if haveFileAPI and typeof(delfile)=="function" and isfile(STORE) then
+                            pcall(delfile, STORE)
+                        end
+
+                        -- update current players + UI
                         for _,p in ipairs(Players:GetPlayers()) do
                             if p~=LocalPlayer then
                                 State.Whitelist[p] = State.AllTargeted
-                                State.Prefs[p.UserId] = State.AllTargeted
                             end
                         end
                         updatePlayerListUI()
@@ -690,4 +703,3 @@ local function init()
 end
 
 init()
-
