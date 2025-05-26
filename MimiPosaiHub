@@ -1,51 +1,98 @@
---##################################################################################################
---  MimiValyria Hub – Rayfield Edition (press  M  to toggle)
---  Fully copy-and-paste ready.  No edits required.
---##################################################################################################
+--############################################################################################
+--  MimiValyria Hub – Rayfield Edition  (press  M  to toggle)
+--  • Each button’s load-string runs ONCE per **current** session only.
+--    Re-joining the game resets everything, so you can run scripts again.
+--############################################################################################
 
---// 1.  Rayfield Library --------------------------------------------------------------------------
+----------------------------------------------------------- SERVICES -------------------------
+local CoreGui = game:GetService("CoreGui")
+
+----------------------------------------------------------- FLAG FOLDER ----------------------
+local FLAGS_FOLDER = "MimiValyriaFlags"
+
+-- wipe any leftovers from a previous server hop / re-join
+local old = CoreGui:FindFirstChild(FLAGS_FOLDER)
+if old then old:Destroy() end
+
+-- fresh folder for this session
+local flagsFolder = Instance.new("Folder")
+flagsFolder.Name  = FLAGS_FOLDER
+flagsFolder.Parent= CoreGui
+
+-- executed-this-session table
+local Executed = {}
+
+local function mark(scriptName)
+    if Executed[scriptName] then return end
+    Executed[scriptName] = true
+    local b  = Instance.new("BoolValue", flagsFolder)
+    b.Name   = scriptName
+    b.Value  = true
+end
+
+----------------------------------------------------------- LOAD RAYFIELD --------------------
 local Rayfield = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/refs/heads/main/source.lua",
-    true))()
+    "https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/refs/heads/main/source.lua", true))()
 
---// 2.  Main Window -------------------------------------------------------------------------------
 local Window = Rayfield:CreateWindow({
-    Name                = "MimiValyria Hub",
-    LoadingTitle        = "MimiValyria Hub",
-    LoadingSubtitle     = "Calling Out to MimiPosai",
-    ConfigurationSaving = {Enabled = false},
-    Discord             = {Enabled = false},
-    KeySystem           = false,           -- no key / whitelisting prompt
-    ToggleUIKeybind     = Enum.KeyCode.M   -- open / close with M
+    Name            = "MimiValyria Hub",
+    LoadingTitle    = "MimiValyria Hub",
+    LoadingSubtitle = "Calling Out to MimiPosai",
+    ToggleUIKeybind = Enum.KeyCode.M,
+    KeySystem       = false,
+    ConfigurationSaving = {Enabled = false}
 })
 
---// 3.  Tab & Section -----------------------------------------------------------------------------
-local Tab      = Window:CreateTab("Scripts")             -- icon optional; omit for simplicity
-local Section  = Tab:CreateSection("Loadstring Scripts") -- nice header line
-
---// 4.  Exact Loadstrings – ONE CLICK EACH ---------------------------------------------------------
+----------------------------------------------------------- SCRIPT LIST ----------------------
 local Scripts = {
-    {Name = "Nameless Admin",   Url = "https://raw.githubusercontent.com/FD2Team/Nameless-Admin-No-Byfron-Kick/main/Source"},
-    {Name = "TKA Lock",         Url = "https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/yass"},
-    {Name = "TKA Fling",        Url = "https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/POSAI%20LAV"},
-    {Name = "Hitbox Expander",  Url = "https://raw.githubusercontent.com/Vcsk/RobloxScripts/main/HitboxExpander.lua"},
-    {Name = "EB Fling",         Url = "https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/illusion"},
-    {Name = "EB Spell Spawner", Url = "https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/spawnspells"}
+    {Name="Nameless Admin",   Url="https://raw.githubusercontent.com/FD2Team/Nameless-Admin-No-Byfron-Kick/main/Source"},
+    {Name="TKA Lock",         Url="https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/yass"},
+    {Name="TKA Fling",        Url="https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/POSAI%20LAV"},
+    {Name="Hitbox Expander",  Url="https://raw.githubusercontent.com/Vcsk/RobloxScripts/main/HitboxExpander.lua"},
+    {Name="EB Fling",         Url="https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/illusion"},
+    {Name="EB Spell Spawner", Url="https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/spawnspells"}
 }
 
-local hasRun = {}  -- stops accidental double-runs in one session
+----------------------------------------------------------- GUI TAB & BUTTONS -----------------
+local Tab = Window:CreateTab("Scripts")
+Tab:CreateSection("Loadstring Scripts")
+
+local Buttons = {}
 
 for _, info in ipairs(Scripts) do
-    Tab:CreateButton({
-        Name = info.Name,
-        Callback = function()
-            if hasRun[info.Name] then return end
-            hasRun[info.Name] = true
-            task.spawn(function()
-                pcall(function()
-                    loadstring(game:HttpGet(info.Url, true))()
-                end)
+    Buttons[info.Name] = Tab:CreateButton({
+        Name         = info.Name,
+        InteractText = "",
+        Callback     = function(btn)
+            if Executed[info.Name] then
+                Rayfield:Notify({Title="MimiValyria Hub",Content="Already executed.",Duration=3})
+                return
+            end
+            local ok, err = pcall(function()
+                loadstring(game:HttpGet(info.Url, true))()
             end)
+            if ok then
+                mark(info.Name)
+                pcall(function() btn:Set({InteractText="Executed"}) end)
+                Rayfield:Notify({Title="MimiValyria Hub",Content=info.Name.." executed.",Duration=3})
+            else
+                Rayfield:Notify({Title="Execution Error",Content=tostring(err),Duration=6})
+            end
         end
     })
 end
+
+----------------------------------------------------------- LIVE SYNC ------------------------
+flagsFolder.ChildAdded:Connect(function(c)
+    if c:IsA("BoolValue") and Buttons[c.Name] then
+        Executed[c.Name] = true
+        pcall(function() Buttons[c.Name]:Set({InteractText="Executed"}) end)
+    end
+end)
+
+flagsFolder.ChildRemoved:Connect(function(c)
+    if c:IsA("BoolValue") and Buttons[c.Name] then
+        Executed[c.Name] = nil
+        pcall(function() Buttons[c.Name]:Set({InteractText=""}) end)
+    end
+end)
