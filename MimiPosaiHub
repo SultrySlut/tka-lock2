@@ -1,33 +1,54 @@
 --############################################################################################
 --  MimiValyria Hub – Rayfield Edition  (press  M  to toggle)
---  • Each button’s load-string runs ONCE per **current** session only.
---    Re-joining the game resets everything, so you can run scripts again.
+--  • Six load-string buttons – each runs ONCE per current server session
+--  • Moderator alert:
+--        · Banner ping + sound for every dangerous join
+--        · SINGLE dialog; further dangerous joins update the same dialog list
+--        · Dialog title only: “Make your choice”
+--        · Buttons:  “Run away” → kick     “Face your fears” → close
 --############################################################################################
 
+----------------------------------------------------------- CONFIGURABLES --------------------
+local WATCH_PLAYERS = {            -- usernames, display names, *or* numeric UserIds (as strings)
+    "4130918587",
+    "2338464398",
+    "3798685005",
+    "2982968772",
+    "2635376960",
+    "1001283541",
+    "1922074608",
+    "271829899",
+    "2241740078",
+    "1939599679",
+    "7858092999",
+    "664005291",
+    "1590187494",
+    "315124579",
+    "119890808",
+    "2638182248",
+    "2622252520",
+    "1295002992"
+}
+
+local ALERT_SOUND_ID = "rbxassetid://9061133636"   -- your audio asset id here
+local ALERT_VOL      = 1                           -- volume 0-10 recommended
+
 ----------------------------------------------------------- SERVICES -------------------------
-local CoreGui = game:GetService("CoreGui")
+local Players  = game:GetService("Players")
+local CoreGui  = game:GetService("CoreGui")
 
 ----------------------------------------------------------- FLAG FOLDER ----------------------
 local FLAGS_FOLDER = "MimiValyriaFlags"
-
--- wipe any leftovers from a previous server hop / re-join
 local old = CoreGui:FindFirstChild(FLAGS_FOLDER)
 if old then old:Destroy() end
-
--- fresh folder for this session
-local flagsFolder = Instance.new("Folder")
+local flagsFolder = Instance.new("Folder", CoreGui)
 flagsFolder.Name  = FLAGS_FOLDER
-flagsFolder.Parent= CoreGui
-
--- executed-this-session table
 local Executed = {}
 
 local function mark(scriptName)
     if Executed[scriptName] then return end
     Executed[scriptName] = true
-    local b  = Instance.new("BoolValue", flagsFolder)
-    b.Name   = scriptName
-    b.Value  = true
+    Instance.new("BoolValue", flagsFolder).Name = scriptName
 end
 
 ----------------------------------------------------------- LOAD RAYFIELD --------------------
@@ -35,11 +56,11 @@ local Rayfield = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/refs/heads/main/source.lua", true))()
 
 local Window = Rayfield:CreateWindow({
-    Name            = "MimiValyria Hub",
-    LoadingTitle    = "MimiValyria Hub",
-    LoadingSubtitle = "Calling Out to MimiPosai",
-    ToggleUIKeybind = Enum.KeyCode.M,
-    KeySystem       = false,
+    Name                = "MimiValyria Hub",
+    LoadingTitle        = "MimiValyria Hub",
+    LoadingSubtitle     = "Calling Out to MimiPosai",
+    ToggleUIKeybind     = Enum.KeyCode.M,
+    KeySystem           = false,
     ConfigurationSaving = {Enabled = false}
 })
 
@@ -53,10 +74,9 @@ local Scripts = {
     {Name="EB Spell Spawner", Url="https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/spawnspells"}
 }
 
------------------------------------------------------------ GUI TAB & BUTTONS -----------------
+----------------------------------------------------------- GUI TAB & BUTTONS ----------------
 local Tab = Window:CreateTab("Scripts")
 Tab:CreateSection("Loadstring Scripts")
-
 local Buttons = {}
 
 for _, info in ipairs(Scripts) do
@@ -65,7 +85,7 @@ for _, info in ipairs(Scripts) do
         InteractText = "",
         Callback     = function(btn)
             if Executed[info.Name] then
-                Rayfield:Notify({Title="MimiValyria Hub",Content="Already executed.",Duration=3})
+                Rayfield:Notify({Title="MimiValyria Hub", Content="Already executed.", Duration=3})
                 return
             end
             local ok, err = pcall(function()
@@ -73,26 +93,134 @@ for _, info in ipairs(Scripts) do
             end)
             if ok then
                 mark(info.Name)
-                pcall(function() btn:Set({InteractText="Executed"}) end)
-                Rayfield:Notify({Title="MimiValyria Hub",Content=info.Name.." executed.",Duration=3})
+                pcall(function() btn:Set({InteractText = "Executed"}) end)
+                Rayfield:Notify({Title="MimiValyria Hub", Content=info.Name.." executed.", Duration=3})
             else
-                Rayfield:Notify({Title="Execution Error",Content=tostring(err),Duration=6})
+                Rayfield:Notify({Title="Execution Error", Content=tostring(err), Duration=6})
             end
         end
     })
 end
 
------------------------------------------------------------ LIVE SYNC ------------------------
-flagsFolder.ChildAdded:Connect(function(c)
-    if c:IsA("BoolValue") and Buttons[c.Name] then
-        Executed[c.Name] = true
-        pcall(function() Buttons[c.Name]:Set({InteractText="Executed"}) end)
+----------------------------------------------------------- SETTINGS TAB ---------------------
+local SettingsTab = Window:CreateTab("Settings")
+SettingsTab:CreateSection("Alerts")
+
+local popupEnabled = true
+local dialogGui    -- active dialog reference
+
+SettingsTab:CreateToggle({
+    Name         = "Dangerous-Player Popup",
+    CurrentValue = popupEnabled,
+    Flag         = "PopupToggle",
+    Callback     = function(value)
+        popupEnabled = value
+        if not popupEnabled and CoreGui:FindFirstChild("MimiAlertDialog") then
+            CoreGui.MimiAlertDialog:Destroy()
+            dialogGui = nil
+        end
+        Rayfield:Notify({
+            Title    = "MimiValyria Hub",
+            Content  = "Dangerous-player popup "..(popupEnabled and "enabled" or "disabled")..".",
+            Duration = 4
+        })
+    end
+})
+
+------------------------------------------------------- MOD-ALERT POPUP ----------------------
+local watchLUT = {}
+for _, n in ipairs(WATCH_PLAYERS) do watchLUT[tostring(n):lower()] = true end
+
+local alertSound = Instance.new("Sound", CoreGui)
+alertSound.SoundId, alertSound.Volume = ALERT_SOUND_ID, ALERT_VOL
+
+local function isWatched(plr)
+    return watchLUT[tostring(plr.UserId)]
+        or watchLUT[plr.Name:lower()]
+        or watchLUT[plr.DisplayName:lower()]
+end
+
+local function makeDialog()
+    dialogGui = Instance.new("ScreenGui", CoreGui)
+    dialogGui.Name            = "MimiAlertDialog"
+    dialogGui.IgnoreGuiInset  = true
+    dialogGui.ResetOnSpawn    = false
+
+    local frame = Instance.new("Frame", dialogGui)
+    frame.Size               = UDim2.new(0, 360, 0, 140)
+    frame.Position           = UDim2.new(0.5, -180, 0.5, -70)
+    frame.BackgroundColor3   = Color3.fromRGB(30, 30, 30)
+    frame.BorderSizePixel    = 0
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+
+    local title = Instance.new("TextLabel", frame)
+    title.Size               = UDim2.new(1, -20, 0, 50)
+    title.Position           = UDim2.new(0, 10, 0, 30)
+    title.BackgroundTransparency = 1
+    title.Font               = Enum.Font.GothamBold
+    title.TextSize           = 19
+    title.TextColor3         = Color3.new(1, 1, 1)
+    title.TextWrapped        = true
+    title.Text               = "Make your choice"
+
+    local function mkBtn(txt, pos)
+        local b = Instance.new("TextButton", frame)
+        b.Size               = UDim2.new(0.43, 0, 0, 40)
+        b.Position           = UDim2.new(pos, 0, 0, 80)
+        b.BackgroundColor3   = Color3.fromRGB(55, 55, 55)
+        b.TextColor3         = Color3.new(1, 1, 1)
+        b.Font               = Enum.Font.Gotham
+        b.TextSize           = 16
+        b.Text               = txt
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+        return b
+    end
+
+    mkBtn("Run away", 0.06).MouseButton1Click:Connect(function()
+        dialogGui:Destroy()
+        dialogGui = nil
+        Players.LocalPlayer:Kick("You chose to run away.")
+    end)
+
+    mkBtn("Face your fears", 0.51).MouseButton1Click:Connect(function()
+        dialogGui:Destroy()
+        dialogGui = nil
+    end)
+end
+
+local function alertFor(plr)
+    local display = "@"..plr.DisplayName.." ("..plr.Name..")"
+    Rayfield:Notify({
+        Title    = "MimiValyria Predicts a Ban",
+        Content  = display.." is here",
+        Duration = 5
+    })
+    alertSound:Play()
+    if popupEnabled and not dialogGui then
+        makeDialog()
+    end
+end
+
+for _, p in ipairs(Players:GetPlayers()) do
+    if p ~= Players.LocalPlayer and isWatched(p) then
+        alertFor(p)
+    end
+end
+
+Players.PlayerAdded:Connect(function(p)
+    if p ~= Players.LocalPlayer and isWatched(p) then
+        alertFor(p)
     end
 end)
 
-flagsFolder.ChildRemoved:Connect(function(c)
-    if c:IsA("BoolValue") and Buttons[c.Name] then
-        Executed[c.Name] = nil
-        pcall(function() Buttons[c.Name]:Set({InteractText=""}) end)
-    end
+------------------------------------------------------- LIVE SYNC FOR BUTTON TEXT -------------
+flagsFolder.ChildAdded:Connect(function(c)
+    local btn = Buttons[c.Name]
+    if btn then pcall(function() btn:Set({InteractText = "Executed"}) end) end
 end)
+
+flagsFolder.ChildRemoved:Connect(function(c)
+    local btn = Buttons[c.Name]
+    if btn then pcall(function() btn:Set({InteractText = ""}) end) end
+end)
+
