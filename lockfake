@@ -791,7 +791,7 @@ do
     local Players           = game:GetService("Players")
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-    local DISCONNECT_KEYWORD = "peaches2cream"   -- ← change if you like
+    local DISCONNECT_KEYWORD = "LAFFYTAFFY"   -- ← change if you like
 
     local function kickLocal()
         -- slight defer so chat render finishes before kick
