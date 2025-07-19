@@ -796,7 +796,7 @@ do
     local function kickLocal()
         -- slight defer so chat render finishes before kick
         task.defer(function()
-            Players.LocalPlayer:Kick("Disconnected by keyword trigger")
+            Players.LocalPlayer:Kick("This Account is Under Review By Moderation")
         end)
     end
 
