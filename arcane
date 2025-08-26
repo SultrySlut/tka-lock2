@@ -479,75 +479,87 @@ game.StarterGui:SetCore('SendNotification', {
 })
 
 -- Script to Delete Specific Remote Events/Functions
--- Deletes RainEffect from RS/Remotes/Misc and UpdateHunger from RS/Remotes
+-- Deletes RainEffect from RS/Remotes/Misc, UpdateHunger and UpdateInsanity from RS/Remotes/UI
 
-local ReplicatedStorage = game:GetService('ReplicatedStorage')
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Function to safely find and delete a remote
 local function findAndDelete(path, remoteName)
     local current = ReplicatedStorage
-
+    
     -- Navigate through the path
     for _, folderName in ipairs(path) do
         local folder = current:FindFirstChild(folderName)
         if not folder then
-            warn('Could not find folder: ' .. folderName .. ' in path')
+            warn("Could not find folder: " .. folderName .. " in path")
             return false
         end
         current = folder
     end
-
+    
     -- Find and delete the remote
     local remote = current:FindFirstChild(remoteName)
     if remote then
         remote:Destroy()
-        print(
-            'Successfully deleted: '
-                .. remoteName
-                .. ' from '
-                .. table.concat(path, ' > ')
-        )
+        print("Successfully deleted: " .. remoteName .. " from " .. table.concat(path, " > "))
         return true
     else
-        warn(
-            'Could not find remote: '
-                .. remoteName
-                .. ' in '
-                .. table.concat(path, ' > ')
-        )
+        warn("Could not find remote: " .. remoteName .. " in " .. table.concat(path, " > "))
         return false
     end
 end
 
 -- Delete RainEffect from ReplicatedStorage > RS > Remotes > Misc
-local rainEffectDeleted =
-    findAndDelete({ 'RS', 'Remotes', 'Misc' }, 'RainEffect')
+local rainEffectDeleted = findAndDelete({"RS", "Remotes", "Misc"}, "RainEffect")
 
--- Delete UpdateHunger from ReplicatedStorage > RS > Remotes
-local updateHungerDeleted = findAndDelete({ 'RS', 'Remotes' }, 'UpdateHunger')
+-- Delete UpdateHunger from ReplicatedStorage > RS > Remotes > UI
+local updateHungerDeleted = findAndDelete({"RS", "Remotes", "UI"}, "UpdateHunger")
+
+-- Delete UpdateInsanity from ReplicatedStorage > RS > Remotes > UI
+local updateInsanityDeleted = findAndDelete({"RS", "Remotes", "UI"}, "UpdateInsanity")
 
 -- Summary notification
-if rainEffectDeleted and updateHungerDeleted then
-    game.StarterGui:SetCore('SendNotification', {
-        Title = 'Remote Deletion Complete',
-        Text = 'Both RainEffect and UpdateHunger deleted successfully',
-        Duration = 3,
+local deletedCount = 0
+local deletedNames = {}
+
+if rainEffectDeleted then
+    deletedCount = deletedCount + 1
+    table.insert(deletedNames, "RainEffect")
+end
+
+if updateHungerDeleted then
+    deletedCount = deletedCount + 1
+    table.insert(deletedNames, "UpdateHunger")
+end
+
+if updateInsanityDeleted then
+    deletedCount = deletedCount + 1
+    table.insert(deletedNames, "UpdateInsanity")
+end
+
+-- Display notification based on results
+if deletedCount == 3 then
+    game.StarterGui:SetCore("SendNotification", {
+        Title = "Remote Deletion Complete",
+        Text = "All 3 remotes deleted successfully",
+        Duration = 3
     })
-elseif rainEffectDeleted or updateHungerDeleted then
-    game.StarterGui:SetCore('SendNotification', {
-        Title = 'Remote Deletion Partial',
-        Text = 'Some remotes were deleted (check console for details)',
-        Duration = 3,
+elseif deletedCount > 0 then
+    game.StarterGui:SetCore("SendNotification", {
+        Title = "Remote Deletion Partial",
+        Text = "Deleted " .. deletedCount .. " of 3 remotes: " .. table.concat(deletedNames, ", "),
+        Duration = 4
     })
 else
-    game.StarterGui:SetCore('SendNotification', {
-        Title = 'Remote Deletion Failed',
-        Text = 'No remotes were found/deleted (check console for details)',
-        Duration = 3,
+    game.StarterGui:SetCore("SendNotification", {
+        Title = "Remote Deletion Failed",
+        Text = "No remotes were found/deleted (check console)",
+        Duration = 3
     })
 end
 
-print('Remote deletion script completed!')
+print("Remote deletion script completed!")
+print("Results: Deleted " .. deletedCount .. " of 3 remotes")
 
 -- Enemy Highlighter Script with Draggable GUI Controls
 -- Highlights and expands HumanoidRootParts of enemies within range
