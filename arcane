@@ -1,1574 +1,1215 @@
--- ESP and Player Highlighting Script with Standalone GUI
--- Extracted ESP and highlighting features with simple toggle controls
+--[[
+    Arcane Script Hub - Cosmic Liquid Glass Interface
+    Changes in this version:
+    - Gradient overlay uses 120,72,144 -> 198,211,227 (translucent)
+    - Keybind set to RightBracket (']')
+    - 'Executed' label after run
+]]
 
+--// Services
 local Players = game:GetService('Players')
+local TweenService = game:GetService('TweenService')
+local HttpService = game:GetService('HttpService')
 local RunService = game:GetService('RunService')
 local UserInputService = game:GetService('UserInputService')
-local TweenService = game:GetService('TweenService')
-local CoreGui = game:GetService('CoreGui')
-local Camera = workspace.CurrentCamera
+local SoundService = game:GetService('SoundService')
 
-local LocalPlayer = Players.LocalPlayer
-local Mouse = LocalPlayer:GetMouse()
+--// Player
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild('PlayerGui')
 
--- Configuration
-local Config = {
-    ShowESP = false,
-    ShowHighlight = false,
-    ShowName = true,
-    ShowHP = true,
-    ShowStuds = true,
-    GUIVisible = true,
+--// Script Configuration
+local SCRIPTS = {
+    {
+        name = 'Auto Fishing',
+        description = 'Automated fishing',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/auto-fishing-gui.txt',
+        category = 'Automation',
+        icon = '🎣',
+    },
+    {
+        name = 'Auto Siren Rock Builder',
+        description = 'Automatically builds platforms at Siren Rock',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/auto_siren_rock_platform_builder.txt',
+        category = 'Building',
+        icon = '🏗️',
+    },
+    {
+        name = 'Enemy Expander',
+        description = 'Expands enemies with anchor system',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/enemy_highlighter_with_anchor.txt',
+        category = 'Combat',
+        icon = '⚔️',
+    },
+    {
+        name = 'Siren Rock Detector',
+        description = 'Continuously detects Siren Rock',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/sirenrock-continuous-detector.txt',
+        category = 'Navigation',
+        icon = '📡',
+    },
+    {
+        name = 'UW Discovery Tracker',
+        description = 'Tracks underwater discoveries',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/uw_discovery_tracker.txt',
+        category = 'Navigation',
+        icon = '🗺️',
+    },
+    {
+        name = 'UW Structure Esp',
+        description = 'Chest and Auric Seaweed Esp',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/uw_structure_script.txt',
+        category = 'Navigation',
+        icon = '🏗️',
+    },
+    {
+    name        = 'Player ESP',
+    description = 'Highlights other players with distance / HP overlay',
+    url         = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/Player%20Esp',
+    category    = 'Navigation',
+    icon        = '🧍',
+    },
+   
+    {
+        name = 'Waypoints',
+        description = 'Create and manage waypoints',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/waypoint-system.txt',
+        category = 'Navigation',
+        icon = '📍',
+    },
+    {
+        name = 'No Fog & Fullbright',
+        description = 'Removes fog and enables fullbright',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/nofog_fullbright_script.txt',
+        category = 'Visual',
+        icon = '💡',
+    },
+    {
+        name = 'No More DS Effects',
+        description = 'Disables Insanity and Dark Water Poisoning',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/remote-deletion-no-hunger.txt',
+        category = 'Status Effect',
+        icon = '🛡️',
+    },
+    {
+        name = 'Noclip GUI',
+        description = 'Walk through walls with GUI controls',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/noclip_gui_script.txt',
+        category = 'Movement',
+        icon = '👻',
+    },
+         {
+        name = 'Vehicle Fly',
+        description = 'Makes vehicles fly',
+        url = 'https://raw.githubusercontent.com/SultrySlut/arcane/refs/heads/main/vehicle-fly-lua-script.txt',
+        category = 'Movement',
+        icon = '🚁',
+    },
+    
 }
 
--- State
-local State = {
-    ESP = {},
-    HoverPlayer = nil,
-    Characters = {},
-}
-
--- Distance thresholds for color coding
-local DIST_CLOSE = 75
-local DIST_MEDIUM = 149
-local DIST_FAR = 299
-
--- Create GUI
-local ScreenGui = Instance.new('ScreenGui')
-ScreenGui.Name = 'ESPHighlightGUI'
-ScreenGui.ResetOnSpawn = false
-ScreenGui.Parent = CoreGui
-
--- Main Frame
-local MainFrame = Instance.new('Frame')
-MainFrame.Size = UDim2.new(0, 280, 0, 320)
-MainFrame.Position = UDim2.new(0, 10, 0.5, -160)
-MainFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
-MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
-MainFrame.Draggable = true
-MainFrame.Parent = ScreenGui
-
-local MainCorner = Instance.new('UICorner')
-MainCorner.CornerRadius = UDim.new(0, 10)
-MainCorner.Parent = MainFrame
-
--- Add gradient
-local MainGradient = Instance.new('UIGradient')
-MainGradient.Color = ColorSequence.new({
-    ColorSequenceKeypoint.new(0, Color3.fromRGB(45, 45, 65)),
-    ColorSequenceKeypoint.new(1, Color3.fromRGB(35, 35, 45)),
-})
-MainGradient.Rotation = 90
-MainGradient.Parent = MainFrame
-
--- Title Bar
-local TitleBar = Instance.new('Frame')
-TitleBar.Size = UDim2.new(1, 0, 0, 40)
-TitleBar.BackgroundColor3 = Color3.fromRGB(50, 100, 180)
-TitleBar.BorderSizePixel = 0
-TitleBar.Parent = MainFrame
-
-local TitleCorner = Instance.new('UICorner')
-TitleCorner.CornerRadius = UDim.new(0, 10)
-TitleCorner.Parent = TitleBar
-
-local TitleLabel = Instance.new('TextLabel')
-TitleLabel.Size = UDim2.new(1, -20, 1, 0)
-TitleLabel.Position = UDim2.new(0, 10, 0, 0)
-TitleLabel.BackgroundTransparency = 1
-TitleLabel.Font = Enum.Font.GothamBold
-TitleLabel.TextSize = 18
-TitleLabel.TextColor3 = Color3.new(1, 1, 1)
-TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
-TitleLabel.Text = 'ESP & Highlight - Drag to Move'
-TitleLabel.Parent = TitleBar
-
--- Toggle Button Creator
-local function createToggleButton(
-    parent,
-    position,
-    size,
-    text,
-    getFunc,
-    setFunc
-)
-    local holder = Instance.new('Frame')
-    holder.Position = position
-    holder.Size = size
-    holder.BackgroundTransparency = 1
-    holder.Parent = parent
-
-    local label = Instance.new('TextLabel')
-    label.Size = UDim2.new(0.7, -5, 1, 0)
-    label.Position = UDim2.new(0, 5, 0, 0)
-    label.BackgroundTransparency = 1
-    label.Font = Enum.Font.GothamSemibold
-    label.TextSize = 14
-    label.TextColor3 = Color3.new(1, 1, 1)
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.Text = text
-    label.Parent = holder
-
-    local toggleBg = Instance.new('Frame')
-    toggleBg.Size = UDim2.new(0, 40, 0, 20)
-    toggleBg.Position = UDim2.new(1, -45, 0.5, 0)
-    toggleBg.AnchorPoint = Vector2.new(0, 0.5)
-    toggleBg.Parent = holder
-
-    local toggleCorner = Instance.new('UICorner')
-    toggleCorner.CornerRadius = UDim.new(1, 0)
-    toggleCorner.Parent = toggleBg
-
-    local knob = Instance.new('Frame')
-    knob.Size = UDim2.new(0, 16, 0, 16)
-    knob.AnchorPoint = Vector2.new(0, 0.5)
-    knob.Position = UDim2.new(0, 2, 0.5, 0)
-    knob.BackgroundColor3 = Color3.new(1, 1, 1)
-    knob.Parent = toggleBg
-
-    local knobCorner = Instance.new('UICorner')
-    knobCorner.CornerRadius = UDim.new(1, 0)
-    knobCorner.Parent = knob
-
-    local function refresh(animate)
-        local isOn = getFunc()
-        local targetPos = isOn and UDim2.new(1, -18, 0.5, 0)
-            or UDim2.new(0, 2, 0.5, 0)
-        local targetColor = isOn and Color3.fromRGB(52, 168, 83)
-            or Color3.fromRGB(120, 120, 120)
-
-        if animate then
-            TweenService:Create(
-                knob,
-                TweenInfo.new(
-                    0.2,
-                    Enum.EasingStyle.Quad,
-                    Enum.EasingDirection.Out
-                ),
-                { Position = targetPos }
-            ):Play()
-            TweenService:Create(
-                toggleBg,
-                TweenInfo.new(
-                    0.2,
-                    Enum.EasingStyle.Quad,
-                    Enum.EasingDirection.Out
-                ),
-                { BackgroundColor3 = targetColor }
-            ):Play()
-        else
-            knob.Position = targetPos
-            toggleBg.BackgroundColor3 = targetColor
-        end
-    end
-
-    refresh(false)
-
-    holder.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            setFunc(not getFunc())
-            refresh(true)
-        end
-    end)
+--// Compatibility / Safety Layer
+local function _hasFS()
+    return typeof(isfile) == 'function'
+        and typeof(writefile) == 'function'
+        and typeof(readfile) == 'function'
+        and typeof(makefolder) == 'function'
+        and typeof(isfolder) == 'function'
 end
 
--- ESP Functions
-local function makeESP(player)
-    if State.ESP[player] then
-        return
-    end
-    local textLabel = Drawing.new('Text')
-    textLabel.Font = 3
-    textLabel.Size = 18
-    textLabel.Center = true
-    textLabel.Outline = true
-    textLabel.OutlineColor = Color3.new(0, 0, 0)
-    textLabel.Visible = Config.ShowESP
-    State.ESP[player] = textLabel
-end
-
-local function removeESP(player)
-    local esp = State.ESP[player]
-    if esp then
-        esp:Remove()
-        State.ESP[player] = nil
-    end
-end
-
-local function getDistance(player1, player2)
-    if not (player1.Character and player2.Character) then
-        return math.huge
-    end
-    local hrp1 = player1.Character:FindFirstChild('HumanoidRootPart')
-    local hrp2 = player2.Character:FindFirstChild('HumanoidRootPart')
-    if not (hrp1 and hrp2) then
-        return math.huge
-    end
-    return (hrp1.Position - hrp2.Position).Magnitude
-end
-
-local function getColorByDistance(distance)
-    if distance <= DIST_CLOSE then
-        return Color3.fromRGB(255, 0, 90)
-    elseif distance <= DIST_MEDIUM then
-        return Color3.fromRGB(180, 0, 255)
-    elseif distance <= DIST_FAR then
-        return Color3.fromRGB(80, 0, 255)
-    else
-        return Color3.fromRGB(150, 150, 150)
-    end
-end
-
-local function buildESPText(player, health, distance)
-    local parts = {}
-    if Config.ShowName then
-        table.insert(parts, player.DisplayName)
-    end
-    if Config.ShowHP then
-        table.insert(parts, '[' .. health .. ' HP]')
-    end
-    if Config.ShowStuds then
-        table.insert(parts, '[' .. distance .. ']')
-    end
-    return table.concat(parts, ' ')
-end
-
-local function updateESP()
-    for player, textLabel in pairs(State.ESP) do
-        local character = player.Character
-        local head = character and character:FindFirstChild('Head')
-
-        if character and head then
-            local viewportPoint, onScreen =
-                Camera:WorldToViewportPoint(head.Position)
-            textLabel.Visible = Config.ShowESP and onScreen
-
-            if onScreen then
-                textLabel.Position =
-                    Vector2.new(viewportPoint.X, viewportPoint.Y - 25)
-                local distance = getDistance(LocalPlayer, player)
-                local health = '?'
-                local humanoid = character:FindFirstChildOfClass('Humanoid')
-                if humanoid then
-                    health = math.floor(humanoid.Health)
-                end
-
-                textLabel.Text =
-                    buildESPText(player, health, math.floor(distance))
-                textLabel.Color = getColorByDistance(distance)
-            end
-        else
-            textLabel.Visible = false
-        end
-    end
-end
-
--- Highlighting Functions
-local function getNearestPlayerToCursor()
-    local mousePos = Vector2.new(Mouse.X, Mouse.Y)
-    local closestPlayer = nil
-    local closestDistance = math.huge
-
-    for player, character in pairs(State.Characters) do
-        if player ~= LocalPlayer then
-            local head = character:FindFirstChild('Head')
-            if head then
-                local viewportPoint, onScreen =
-                    Camera:WorldToViewportPoint(head.Position)
-                if onScreen then
-                    local screenDistance = (mousePos - Vector2.new(
-                        viewportPoint.X,
-                        viewportPoint.Y
-                    )).Magnitude
-                    if screenDistance < closestDistance then
-                        closestPlayer = player
-                        closestDistance = screenDistance
-                    end
-                end
-            end
-        end
-    end
-
-    return closestPlayer
-end
-
-local function updateHighlight()
-    if not Config.ShowHighlight then
-        return
-    end
-
-    local nearestPlayer = getNearestPlayerToCursor()
-
-    if nearestPlayer ~= State.HoverPlayer then
-        -- Remove old highlight
-        for _, highlight in ipairs(CoreGui:GetChildren()) do
-            if
-                highlight:IsA('Highlight')
-                and highlight.Name == 'PlayerHighlight'
-            then
-                highlight:Destroy()
-            end
-        end
-
-        State.HoverPlayer = nearestPlayer
-
-        -- Create new highlight
-        if nearestPlayer and nearestPlayer.Character then
-            local highlight = Instance.new('Highlight')
-            highlight.Name = 'PlayerHighlight'
-            highlight.Adornee = nearestPlayer.Character
-            highlight.FillColor = Color3.new(1, 0, 0.584)
-            highlight.OutlineColor = Color3.new(1, 1, 1)
-            highlight.FillTransparency = 0.85
-            highlight.Parent = CoreGui
-        end
-    end
-end
-
--- Player Tracking
-local function handleCharacter(player, character)
-    State.Characters[player] = character
-    makeESP(player)
-end
-
-local function setupPlayerTracking()
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            makeESP(player)
-            if player.Character then
-                handleCharacter(player, player.Character)
-            end
-            player.CharacterAdded:Connect(function(character)
-                handleCharacter(player, character)
-            end)
-            player.CharacterRemoving:Connect(function()
-                State.Characters[player] = nil
-            end)
-        end
-    end
-
-    Players.PlayerAdded:Connect(function(player)
-        if player ~= LocalPlayer then
-            makeESP(player)
-            player.CharacterAdded:Connect(function(character)
-                handleCharacter(player, character)
-            end)
-        end
-    end)
-
-    Players.PlayerRemoving:Connect(function(player)
-        State.Characters[player] = nil
-        removeESP(player)
-    end)
-end
-
--- Create Toggle Buttons
-local yPos = 60
-local spacing = 35
-
-createToggleButton(
-    MainFrame,
-    UDim2.new(0, 10, 0, yPos),
-    UDim2.new(1, -20, 0, 30),
-    'ESP',
-    function()
-        return Config.ShowESP
-    end,
-    function(value)
-        Config.ShowESP = value
-        for _, esp in pairs(State.ESP) do
-            esp.Visible = value
-        end
-    end
-)
-yPos = yPos + spacing
-
-createToggleButton(
-    MainFrame,
-    UDim2.new(0, 10, 0, yPos),
-    UDim2.new(1, -20, 0, 30),
-    'Player Highlight',
-    function()
-        return Config.ShowHighlight
-    end,
-    function(value)
-        Config.ShowHighlight = value
-        if not value then
-            -- Remove all highlights
-            for _, highlight in ipairs(CoreGui:GetChildren()) do
-                if
-                    highlight:IsA('Highlight')
-                    and highlight.Name == 'PlayerHighlight'
-                then
-                    highlight:Destroy()
-                end
-            end
-            State.HoverPlayer = nil
-        end
-    end
-)
-yPos = yPos + spacing
-
-createToggleButton(
-    MainFrame,
-    UDim2.new(0, 10, 0, yPos),
-    UDim2.new(1, -20, 0, 30),
-    'Show Name',
-    function()
-        return Config.ShowName
-    end,
-    function(value)
-        Config.ShowName = value
-    end
-)
-yPos = yPos + spacing
-
-createToggleButton(
-    MainFrame,
-    UDim2.new(0, 10, 0, yPos),
-    UDim2.new(1, -20, 0, 30),
-    'Show HP',
-    function()
-        return Config.ShowHP
-    end,
-    function(value)
-        Config.ShowHP = value
-    end
-)
-yPos = yPos + spacing
-
-createToggleButton(
-    MainFrame,
-    UDim2.new(0, 10, 0, yPos),
-    UDim2.new(1, -20, 0, 30),
-    'Show Distance',
-    function()
-        return Config.ShowStuds
-    end,
-    function(value)
-        Config.ShowStuds = value
-    end
-)
-
--- Toggle GUI visibility with Right Alt
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then
-        return
-    end
-    if input.KeyCode == Enum.KeyCode.RightAlt then
-        Config.GUIVisible = not Config.GUIVisible
-        MainFrame.Visible = Config.GUIVisible
-    end
-end)
-
--- Main update loop
-RunService.RenderStepped:Connect(function()
-    updateESP()
-    updateHighlight()
-end)
-
--- Initialize
-setupPlayerTracking()
-
--- Notification
-game.StarterGui:SetCore('SendNotification', {
-    Title = 'ESP & Highlight Active',
-    Text = 'Press Right Alt to toggle GUI',
-    Duration = 3,
-})
-
--- Script to Delete Specific Remote Events/Functions
--- Deletes RainEffect from RS/Remotes/Misc, UpdateHunger and UpdateInsanity from RS/Remotes/UI
-
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
--- Function to safely find and delete a remote
-local function findAndDelete(path, remoteName)
-    local current = ReplicatedStorage
-    
-    -- Navigate through the path
-    for _, folderName in ipairs(path) do
-        local folder = current:FindFirstChild(folderName)
-        if not folder then
-            warn("Could not find folder: " .. folderName .. " in path")
-            return false
-        end
-        current = folder
-    end
-    
-    -- Find and delete the remote
-    local remote = current:FindFirstChild(remoteName)
-    if remote then
-        remote:Destroy()
-        print("Successfully deleted: " .. remoteName .. " from " .. table.concat(path, " > "))
-        return true
-    else
-        warn("Could not find remote: " .. remoteName .. " in " .. table.concat(path, " > "))
+local FS = {
+    isfile = typeof(isfile) == 'function' and isfile or function(_)
         return false
+    end,
+    writefile = typeof(writefile) == 'function' and writefile or function() end,
+    readfile = typeof(readfile) == 'function' and readfile or function(_)
+        return nil
+    end,
+    makefolder = typeof(makefolder) == 'function' and makefolder
+        or function() end,
+    isfolder = typeof(isfolder) == 'function' and isfolder or function(_)
+        return false
+    end,
+    delfile = typeof(delfile) == 'function' and delfile or function() end,
+    delfolder = typeof(delfolder) == 'function' and delfolder or function() end,
+}
+
+local function getExecutorName()
+    local ok, a = pcall(function()
+        if typeof(identifyexecutor) == 'function' then
+            return identifyexecutor()
+        end
+        if typeof(identifyexecutor) == 'string' then
+            return identifyexecutor
+        end
+        if typeof(getexecutorname) == 'function' then
+            return getexecutorname()
+        end
+        return 'Unknown'
+    end)
+    local name = ok and a or 'Unknown'
+    if typeof(name) ~= 'string' then
+        name = tostring(name)
+    end
+    return name
+end
+
+local COMPILE = loadstring or load
+local function runRemoteScript(url)
+    local okGet, src = pcall(function()
+        return game:HttpGet(url, true)
+    end)
+    if not okGet or not src then
+        return false, 'HttpGet failed: ' .. tostring(src)
+    end
+    if not COMPILE then
+        return false, 'No loadstring/load available in this executor'
+    end
+    local chunk, cerr = COMPILE(src)
+    if not chunk then
+        return false, 'Compile error: ' .. tostring(cerr)
+    end
+    local okExec, rerr = pcall(chunk)
+    if not okExec then
+        return false, 'Runtime error: ' .. tostring(rerr)
+    end
+    return true
+end
+
+--// Execution Tracking System
+local ExecutionTracker = {}
+ExecutionTracker.__index = ExecutionTracker
+
+function ExecutionTracker.new()
+    local self = setmetatable({}, ExecutionTracker)
+    self.folderName = 'ArcaneHub'
+    self.fileName = 'ExecutionLog.json'
+    self.executionData = {}
+    self.fsEnabled = _hasFS()
+
+    if self.fsEnabled and not FS.isfolder(self.folderName) then
+        FS.makefolder(self.folderName)
+    end
+
+    self:loadData()
+    return self
+end
+
+function ExecutionTracker:loadData()
+    self.executionData = {}
+    if not self.fsEnabled then
+        return
+    end
+    local filePath = self.folderName .. '/' .. self.fileName
+    if FS.isfile(filePath) then
+        local success, data = pcall(function()
+            return HttpService:JSONDecode(FS.readfile(filePath) or '{}')
+        end)
+        if success and type(data) == 'table' then
+            self.executionData = data
+        end
     end
 end
 
--- Delete RainEffect from ReplicatedStorage > RS > Remotes > Misc
-local rainEffectDeleted = findAndDelete({"RS", "Remotes", "Misc"}, "RainEffect")
-
--- Delete UpdateHunger from ReplicatedStorage > RS > Remotes > UI
-local updateHungerDeleted = findAndDelete({"RS", "Remotes", "UI"}, "UpdateHunger")
-
--- Delete UpdateInsanity from ReplicatedStorage > RS > Remotes > UI
-local updateInsanityDeleted = findAndDelete({"RS", "Remotes", "UI"}, "UpdateInsanity")
-
--- Summary notification
-local deletedCount = 0
-local deletedNames = {}
-
-if rainEffectDeleted then
-    deletedCount = deletedCount + 1
-    table.insert(deletedNames, "RainEffect")
+function ExecutionTracker:saveData()
+    if not self.fsEnabled then
+        return
+    end
+    local filePath = self.folderName .. '/' .. self.fileName
+    local ok, enc = pcall(function()
+        return HttpService:JSONEncode(self.executionData)
+    end)
+    if ok and enc then
+        FS.writefile(filePath, enc)
+    end
 end
 
-if updateHungerDeleted then
-    deletedCount = deletedCount + 1
-    table.insert(deletedNames, "UpdateHunger")
+function ExecutionTracker:hasExecuted(scriptName)
+    return self.executionData[scriptName] ~= nil
 end
 
-if updateInsanityDeleted then
-    deletedCount = deletedCount + 1
-    table.insert(deletedNames, "UpdateInsanity")
+function ExecutionTracker:recordExecution(scriptName)
+    self.executionData[scriptName] = {
+        timestamp = os.time(),
+        date = os.date('%Y-%m-%d %H:%M:%S'),
+        executor = getExecutorName(),
+    }
+    self:saveData()
 end
 
--- Display notification based on results
-if deletedCount == 3 then
-    game.StarterGui:SetCore("SendNotification", {
-        Title = "Remote Deletion Complete",
-        Text = "All 3 remotes deleted successfully",
-        Duration = 3
-    })
-elseif deletedCount > 0 then
-    game.StarterGui:SetCore("SendNotification", {
-        Title = "Remote Deletion Partial",
-        Text = "Deleted " .. deletedCount .. " of 3 remotes: " .. table.concat(deletedNames, ", "),
-        Duration = 4
-    })
-else
-    game.StarterGui:SetCore("SendNotification", {
-        Title = "Remote Deletion Failed",
-        Text = "No remotes were found/deleted (check console)",
-        Duration = 3
-    })
+function ExecutionTracker:clearExecution(scriptName)
+    if self.executionData[scriptName] then
+        self.executionData[scriptName] = nil
+        self:saveData()
+        return true
+    end
+    return false
 end
 
-print("Remote deletion script completed!")
-print("Results: Deleted " .. deletedCount .. " of 3 remotes")
-
--- Enemy Highlighter Script with Draggable GUI Controls
--- Highlights and expands HumanoidRootParts of enemies within range
-
-local Players = game:GetService('Players')
-local RunService = game:GetService('RunService')
-local TweenService = game:GetService('TweenService')
-local UserInputService = game:GetService('UserInputService')
-local Workspace = game:GetService('Workspace')
-local LocalPlayer = Players.LocalPlayer
-
--- Configuration
-local settings = {
-    enabled = false,
-    range = 1000,
-    hitboxSize = 1, -- Starting at 1,1,1
-    highlightColor = Color3.fromRGB(255, 0, 0),
-    transparency = 0.8,
-    showRangeCircle = true,
-}
-
--- Storage
-local highlightedParts = {}
-local rangeCircleParts = {}
-local updateConnection = nil
-
--- Create GUI
-local ScreenGui = Instance.new('ScreenGui')
-ScreenGui.Name = 'EnemyHighlighterGUI'
-ScreenGui.ResetOnSpawn = false
-ScreenGui.Parent = game:GetService('CoreGui')
-
--- Main Frame
-local MainFrame = Instance.new('Frame')
-MainFrame.Size = UDim2.new(0, 300, 0, 400)
-MainFrame.Position = UDim2.new(0, 10, 0.5, -200)
-MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-MainFrame.BorderSizePixel = 0
-MainFrame.Parent = ScreenGui
-
-local MainCorner = Instance.new('UICorner')
-MainCorner.CornerRadius = UDim.new(0, 12)
-MainCorner.Parent = MainFrame
-
--- Make GUI Draggable
-local dragging = false
-local dragStart = nil
-local startPos = nil
-
-local function updateInput(input)
-    local delta = input.Position - dragStart
-    MainFrame.Position = UDim2.new(
-        startPos.X.Scale,
-        startPos.X.Offset + delta.X,
-        startPos.Y.Scale,
-        startPos.Y.Offset + delta.Y
-    )
+function ExecutionTracker:clearAllExecutions()
+    self.executionData = {}
+    self:saveData()
 end
 
-MainFrame.InputBegan:Connect(function(input)
-    if
-        input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch
-    then
-        dragging = true
-        dragStart = input.Position
-        startPos = MainFrame.Position
+function ExecutionTracker:getExecutionLog()
+    return self.executionData
+end
 
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
+function ExecutionTracker:wipeAllData()
+    self.executionData = {}
+    if not self.fsEnabled then
+        return
+    end
+    local filePath = self.folderName .. '/' .. self.fileName
+    if FS.isfile(filePath) then
+        FS.delfile(filePath)
+    end
+    pcall(function()
+        if FS.isfolder(self.folderName) then
+            FS.delfolder(self.folderName)
+        end
+    end)
+end
+
+-- Initialize tracker
+local tracker = ExecutionTracker.new()
+
+-- Auto-cleanup functions
+local function setupAutoCleanup()
+    Players.PlayerRemoving:Connect(function(player)
+        if player == Player then
+            tracker:wipeAllData()
+        end
+    end)
+end
+
+--// UI Helpers
+local function createGlassEffect(frame)
+    frame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    frame.BackgroundTransparency = 0.85
+    frame.BorderSizePixel = 0
+
+    local border = Instance.new('UIStroke')
+    border.Color = Color3.fromRGB(255, 255, 255)
+    border.Transparency = 0.7
+    border.Thickness = 1
+    border.Parent = frame
+
+    local corner = Instance.new('UICorner')
+    corner.CornerRadius = UDim.new(0, 16)
+    corner.Parent = frame
+
+    return frame
+end
+
+local function createNotification(title, message, icon, color)
+    local notification = Instance.new('Frame')
+    notification.Name = 'Notification'
+    notification.Size = UDim2.new(0, 350, 0, 80)
+    notification.Position = UDim2.new(1, -370, 0, 20)
+    notification.BackgroundColor3 = color or Color3.fromRGB(138, 43, 226)
+    notification.BackgroundTransparency = 0.1
+    notification.BorderSizePixel = 0
+    notification.ZIndex = 1000
+    notification.Parent = PlayerGui:FindFirstChild('ArcaneHub') or PlayerGui
+
+    createGlassEffect(notification)
+
+    local iconLabel = Instance.new('TextLabel')
+    iconLabel.Size = UDim2.new(0, 40, 1, 0)
+    iconLabel.Position = UDim2.new(0, 15, 0, 0)
+    iconLabel.BackgroundTransparency = 1
+    iconLabel.Text = icon or '✨'
+    iconLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    iconLabel.TextScaled = true
+    iconLabel.Font = Enum.Font.SourceSansBold
+    iconLabel.Parent = notification
+
+    local titleLabel = Instance.new('TextLabel')
+    titleLabel.Size = UDim2.new(1, -70, 0.5, 0)
+    titleLabel.Position = UDim2.new(0, 60, 0, 5)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = title
+    titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    titleLabel.TextScaled = true
+    titleLabel.Font = Enum.Font.SourceSansBold
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Parent = notification
+
+    local messageLabel = Instance.new('TextLabel')
+    messageLabel.Size = UDim2.new(1, -70, 0.5, -5)
+    messageLabel.Position = UDim2.new(0, 60, 0.5, 0)
+    messageLabel.BackgroundTransparency = 1
+    messageLabel.Text = message
+    messageLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    messageLabel.TextTransparency = 0.3
+    messageLabel.TextScaled = true
+    messageLabel.Font = Enum.Font.SourceSans
+    messageLabel.TextXAlignment = Enum.TextXAlignment.Left
+    messageLabel.TextWrapped = true
+    messageLabel.Parent = notification
+
+    notification.Position = UDim2.new(1, 20, 0, 20)
+    TweenService
+        :Create(
+            notification,
+            TweenInfo.new(0.5, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+            { Position = UDim2.new(1, -370, 0, 20) }
+        )
+        :Play()
+
+    task.spawn(function()
+        task.wait(5)
+        local slideOut = TweenService:Create(
+            notification,
+            TweenInfo.new(0.5, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
+            { Position = UDim2.new(1, 20, 0, 20) }
+        )
+        slideOut:Play()
+        slideOut.Completed:Connect(function()
+            if notification and notification.Parent then
+                notification:Destroy()
             end
         end)
-    end
-end)
-
-MainFrame.InputChanged:Connect(function(input)
-    if
-        dragging
-        and (
-            input.UserInputType == Enum.UserInputType.MouseMovement
-            or input.UserInputType == Enum.UserInputType.Touch
-        )
-    then
-        updateInput(input)
-    end
-end)
-
--- Title
-local TitleLabel = Instance.new('TextLabel')
-TitleLabel.Size = UDim2.new(1, 0, 0, 40)
-TitleLabel.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-TitleLabel.BorderSizePixel = 0
-TitleLabel.Text = 'Enemy Expander - Drag to Move'
-TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-TitleLabel.TextScaled = true
-TitleLabel.Font = Enum.Font.SourceSansBold
-TitleLabel.Parent = MainFrame
-
-local TitleCorner = Instance.new('UICorner')
-TitleCorner.CornerRadius = UDim.new(0, 12)
-TitleCorner.Parent = TitleLabel
-
--- Toggle Button
-local ToggleButton = Instance.new('TextButton')
-ToggleButton.Size = UDim2.new(0.8, 0, 0, 40)
-ToggleButton.Position = UDim2.new(0.1, 0, 0, 60)
-ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
-ToggleButton.Text = 'Disabled'
-ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-ToggleButton.TextScaled = true
-ToggleButton.Font = Enum.Font.SourceSansBold
-ToggleButton.Parent = MainFrame
-
-local ToggleCorner = Instance.new('UICorner')
-ToggleCorner.CornerRadius = UDim.new(0, 8)
-ToggleCorner.Parent = ToggleButton
-
--- Range Section
-local RangeLabel = Instance.new('TextLabel')
-RangeLabel.Size = UDim2.new(0.8, 0, 0, 25)
-RangeLabel.Position = UDim2.new(0.1, 0, 0, 115)
-RangeLabel.BackgroundTransparency = 1
-RangeLabel.Text = 'Range: 1000 studs'
-RangeLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-RangeLabel.TextScaled = true
-RangeLabel.Font = Enum.Font.SourceSans
-RangeLabel.Parent = MainFrame
-
-local RangeSlider = Instance.new('Frame')
-RangeSlider.Size = UDim2.new(0.8, 0, 0, 20)
-RangeSlider.Position = UDim2.new(0.1, 0, 0, 145)
-RangeSlider.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-RangeSlider.BorderSizePixel = 0
-RangeSlider.Parent = MainFrame
-
-local RangeSliderCorner = Instance.new('UICorner')
-RangeSliderCorner.CornerRadius = UDim.new(0, 10)
-RangeSliderCorner.Parent = RangeSlider
-
-local RangeSliderButton = Instance.new('TextButton')
-RangeSliderButton.Size = UDim2.new(0, 20, 1, 0)
-RangeSliderButton.Position = UDim2.new(0.5, -10, 0, 0)
-RangeSliderButton.BackgroundColor3 = Color3.fromRGB(100, 150, 255)
-RangeSliderButton.Text = ''
-RangeSliderButton.Parent = RangeSlider
-
-local RangeButtonCorner = Instance.new('UICorner')
-RangeButtonCorner.CornerRadius = UDim.new(0, 10)
-RangeButtonCorner.Parent = RangeSliderButton
-
--- Hitbox Size Section
-local SizeLabel = Instance.new('TextLabel')
-SizeLabel.Size = UDim2.new(0.8, 0, 0, 25)
-SizeLabel.Position = UDim2.new(0.1, 0, 0, 180)
-SizeLabel.BackgroundTransparency = 1
-SizeLabel.Text = 'Hitbox Size: 1 x 1 x 1'
-SizeLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-SizeLabel.TextScaled = true
-SizeLabel.Font = Enum.Font.SourceSans
-SizeLabel.Parent = MainFrame
-
-local SizeSlider = Instance.new('Frame')
-SizeSlider.Size = UDim2.new(0.8, 0, 0, 20)
-SizeSlider.Position = UDim2.new(0.1, 0, 0, 210)
-SizeSlider.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-SizeSlider.BorderSizePixel = 0
-SizeSlider.Parent = MainFrame
-
-local SizeSliderCorner = Instance.new('UICorner')
-SizeSliderCorner.CornerRadius = UDim.new(0, 10)
-SizeSliderCorner.Parent = SizeSlider
-
-local SizeSliderButton = Instance.new('TextButton')
-SizeSliderButton.Size = UDim2.new(0, 20, 1, 0)
-SizeSliderButton.Position = UDim2.new(0, -10, 0, 0)
-SizeSliderButton.BackgroundColor3 = Color3.fromRGB(100, 150, 255)
-SizeSliderButton.Text = ''
-SizeSliderButton.Parent = SizeSlider
-
-local SizeButtonCorner = Instance.new('UICorner')
-SizeButtonCorner.CornerRadius = UDim.new(0, 10)
-SizeButtonCorner.Parent = SizeSliderButton
-
--- Color Section
-local ColorLabel = Instance.new('TextLabel')
-ColorLabel.Size = UDim2.new(0.8, 0, 0, 25)
-ColorLabel.Position = UDim2.new(0.1, 0, 0, 245)
-ColorLabel.BackgroundTransparency = 1
-ColorLabel.Text = 'Highlight Color'
-ColorLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-ColorLabel.TextScaled = true
-ColorLabel.Font = Enum.Font.SourceSans
-ColorLabel.Parent = MainFrame
-
-local ColorFrame = Instance.new('Frame')
-ColorFrame.Size = UDim2.new(0.8, 0, 0, 30)
-ColorFrame.Position = UDim2.new(0.1, 0, 0, 275)
-ColorFrame.BackgroundColor3 = settings.highlightColor
-ColorFrame.BorderSizePixel = 0
-ColorFrame.Parent = MainFrame
-
-local ColorCorner = Instance.new('UICorner')
-ColorCorner.CornerRadius = UDim.new(0, 8)
-ColorCorner.Parent = ColorFrame
-
--- Color Preset Buttons
-local colorPresets = {
-    { color = Color3.fromRGB(255, 0, 0), name = 'Red' },
-    { color = Color3.fromRGB(0, 255, 0), name = 'Green' },
-    { color = Color3.fromRGB(0, 0, 255), name = 'Blue' },
-    { color = Color3.fromRGB(255, 255, 0), name = 'Yellow' },
-    { color = Color3.fromRGB(255, 0, 255), name = 'Magenta' },
-    { color = Color3.fromRGB(0, 255, 255), name = 'Cyan' },
-}
-
-local colorButtonsFrame = Instance.new('Frame')
-colorButtonsFrame.Size = UDim2.new(0.8, 0, 0, 30)
-colorButtonsFrame.Position = UDim2.new(0.1, 0, 0, 310)
-colorButtonsFrame.BackgroundTransparency = 1
-colorButtonsFrame.Parent = MainFrame
-
-for i, preset in ipairs(colorPresets) do
-    local colorButton = Instance.new('TextButton')
-    colorButton.Size = UDim2.new(0.15, 0, 1, 0)
-    colorButton.Position = UDim2.new((i - 1) * 0.17, 0, 0, 0)
-    colorButton.BackgroundColor3 = preset.color
-    colorButton.Text = ''
-    colorButton.Parent = colorButtonsFrame
-
-    local buttonCorner = Instance.new('UICorner')
-    buttonCorner.CornerRadius = UDim.new(0, 4)
-    buttonCorner.Parent = colorButton
-
-    colorButton.MouseButton1Click:Connect(function()
-        settings.highlightColor = preset.color
-        ColorFrame.BackgroundColor3 = preset.color
-        updateHighlights()
     end)
 end
 
--- Show Range Circle Toggle
-local RangeCircleButton = Instance.new('TextButton')
-RangeCircleButton.Size = UDim2.new(0.8, 0, 0, 35)
-RangeCircleButton.Position = UDim2.new(0.1, 0, 0, 350)
-RangeCircleButton.BackgroundColor3 = Color3.fromRGB(100, 200, 100)
-RangeCircleButton.Text = 'Range Circle: ON'
-RangeCircleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-RangeCircleButton.TextScaled = true
-RangeCircleButton.Font = Enum.Font.SourceSans
-RangeCircleButton.Parent = MainFrame
+--// Create Main GUI
+local screenGui = Instance.new('ScreenGui')
+screenGui.Name = 'ArcaneHub'
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = PlayerGui
 
-local RangeCircleCorner = Instance.new('UICorner')
-RangeCircleCorner.CornerRadius = UDim.new(0, 8)
-RangeCircleCorner.Parent = RangeCircleButton
+-- Setup auto-cleanup
+setupAutoCleanup()
 
--- Create range circle outline
-local function createRangeCircle()
-    -- Clear existing circle parts
-    for _, part in pairs(rangeCircleParts) do
-        if part then
-            part:Destroy()
-        end
-    end
-    rangeCircleParts = {}
+-- Main Container
+local mainFrame = Instance.new('Frame')
+mainFrame.Name = 'MainFrame'
+mainFrame.Size = UDim2.new(0, 1000, 0, 700)
+mainFrame.Position = UDim2.new(0.5, -500, 0.5, -350)
+mainFrame.BackgroundTransparency = 1
+mainFrame.ZIndex = 2
+mainFrame.Parent = screenGui
 
-    local segments = 104 -- Number of segments for the circle
-    local angleStep = (math.pi * 2) / segments
-    local thickness = 5 -- Thickness of the outline
+-- Background wallpaper (back layer)
+local backgroundWallpaper = Instance.new('ImageLabel')
+backgroundWallpaper.Name = 'BackgroundWallpaper'
+backgroundWallpaper.Size = UDim2.new(1, 0, 1, 0)
+backgroundWallpaper.Position = UDim2.new(0, 0, 0, 0)
+backgroundWallpaper.BackgroundTransparency = 1
+backgroundWallpaper.Image = 'rbxassetid://108506133175739'
+backgroundWallpaper.ImageTransparency = 0
+backgroundWallpaper.ScaleType = Enum.ScaleType.Stretch
+backgroundWallpaper.ZIndex = 1
+backgroundWallpaper.Parent = mainFrame
 
-    for i = 1, segments do
-        local angle1 = angleStep * (i - 1)
-        local angle2 = angleStep * i
+local bgCorner = Instance.new('UICorner')
+bgCorner.CornerRadius = UDim.new(0, 16)
+bgCorner.Parent = backgroundWallpaper
 
-        local part = Instance.new('Part')
-        part.Name = 'RangeCircleSegment'
-        part.Material = Enum.Material.Neon
-        part.BrickColor = BrickColor.new(Color3.fromRGB(225, 105, 180))
-        part.Anchored = true
-        part.CanCollide = false
-        part.Transparency = 0.3
-        part.Size = Vector3.new(thickness, 2, thickness)
-        part.Shape = Enum.PartType.Block
-        part.Parent = Workspace
+-- === Gradient overlay (your colors) ===
+local gradientOverlay = Instance.new('Frame')
+gradientOverlay.Name = 'GradientOverlay'
+gradientOverlay.Size = UDim2.new(1, 0, 1, 0)
+gradientOverlay.Position = UDim2.new(0, 0, 0, 0)
+gradientOverlay.BackgroundTransparency = 0 -- must be 0 for UIGradient to render
+gradientOverlay.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- neutral base
+gradientOverlay.ZIndex = 2
+gradientOverlay.Parent = mainFrame
 
-        table.insert(rangeCircleParts, part)
-    end
+local overlayCorner = Instance.new('UICorner')
+overlayCorner.CornerRadius = UDim.new(0, 16)
+overlayCorner.Parent = gradientOverlay
+
+local overlayGradient = Instance.new('UIGradient')
+overlayGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(120, 72, 144)), -- top
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(198, 211, 227)), -- bottom
+})
+overlayGradient.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0.45), -- top opacity (lower = darker)
+    NumberSequenceKeypoint.new(1, 0.65), -- bottom opacity
+})
+overlayGradient.Rotation = 90 -- vertical gradient
+overlayGradient.Parent = gradientOverlay
+-- === end gradient overlay ===
+
+-- Header
+local header = Instance.new('Frame')
+header.Name = 'Header'
+header.Size = UDim2.new(1, 0, 0, 80)
+header.Position = UDim2.new(0, 0, 0, 0)
+header.ZIndex = 10
+header.Parent = mainFrame
+createGlassEffect(header)
+
+local logo = Instance.new('TextLabel')
+logo.Size = UDim2.new(0, 300, 1, 0)
+logo.Position = UDim2.new(0, 20, 0, 0)
+logo.BackgroundTransparency = 1
+logo.Text = '⚡ ARCANE HUB'
+logo.TextColor3 = Color3.fromRGB(255, 255, 255)
+logo.TextScaled = true
+logo.Font = Enum.Font.SourceSansBold
+logo.TextXAlignment = Enum.TextXAlignment.Left
+logo.ZIndex = 11
+logo.Parent = header
+
+local status = Instance.new('TextLabel')
+status.Size = UDim2.new(0, 150, 0, 30)
+status.Position = UDim2.new(1, -200, 0.5, -15)
+status.BackgroundTransparency = 1
+status.Text = '🟢 Connected'
+status.TextColor3 = Color3.fromRGB(16, 185, 129)
+status.TextScaled = true
+status.Font = Enum.Font.SourceSansBold
+status.ZIndex = 11
+status.Parent = header
+
+-- Content Container
+local contentFrame = Instance.new('Frame')
+contentFrame.Name = 'ContentFrame'
+contentFrame.Size = UDim2.new(1, 0, 1, -100)
+contentFrame.Position = UDim2.new(0, 0, 0, 90)
+contentFrame.BackgroundTransparency = 1
+contentFrame.ZIndex = 5
+contentFrame.Parent = mainFrame
+
+-- Sidebar
+local sidebar = Instance.new('Frame')
+sidebar.Name = 'Sidebar'
+sidebar.Size = UDim2.new(0, 250, 1, 0)
+sidebar.Position = UDim2.new(0, 0, 0, 0)
+sidebar.ZIndex = 6
+sidebar.Parent = contentFrame
+createGlassEffect(sidebar)
+
+-- Tab buttons
+local tabs = { 'Scripts', 'Execution Log', 'Settings' }
+local currentTab = 'Scripts'
+local tabButtons = {}
+
+for i, tabName in ipairs(tabs) do
+    local tabButton = Instance.new('TextButton')
+    tabButton.Name = tabName .. 'Tab'
+    tabButton.Size = UDim2.new(1, -20, 0, 50)
+    tabButton.Position = UDim2.new(0, 10, 0, (i - 1) * 60 + 20)
+    tabButton.BackgroundColor3 = Color3.fromRGB(200, 162, 200)
+    tabButton.BackgroundTransparency = currentTab == tabName and 0.3 or 0.6
+    tabButton.BorderSizePixel = 0
+    tabButton.Text = tabName
+    tabButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    tabButton.TextScaled = true
+    tabButton.Font = Enum.Font.SourceSansBold
+    tabButton.ZIndex = 7
+    tabButton.Parent = sidebar
+
+    local corner = Instance.new('UICorner')
+    corner.CornerRadius = UDim.new(0, 12)
+    corner.Parent = tabButton
+
+    local gradient = Instance.new('UIGradient')
+    gradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(200, 162, 200)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(173, 216, 230)),
+    })
+    gradient.Rotation = currentTab == tabName and 45 or 90
+    gradient.Parent = tabButton
+
+    local border = Instance.new('UIStroke')
+    border.Color = Color3.fromRGB(173, 216, 230)
+    border.Transparency = currentTab == tabName and 0.3 or 0.7
+    border.Thickness = 1
+    border.Parent = tabButton
+
+    tabButtons[tabName] = tabButton
 end
 
--- Update range circle position
-local function updateRangeCircle()
-    if not settings.showRangeCircle or #rangeCircleParts == 0 then
-        return
-    end
+-- Main Panel
+local mainPanel = Instance.new('Frame')
+mainPanel.Name = 'MainPanel'
+mainPanel.Size = UDim2.new(1, -270, 1, 0)
+mainPanel.Position = UDim2.new(0, 260, 0, 0)
+mainPanel.ZIndex = 6
+mainPanel.Parent = contentFrame
+createGlassEffect(mainPanel)
 
-    local character = LocalPlayer.Character
-    if character and character:FindFirstChild('HumanoidRootPart') then
-        local centerPos = character.HumanoidRootPart.Position
-        local segments = #rangeCircleParts
-        local angleStep = (math.pi * 2) / segments
+-- Panels
+local scriptsPanel = Instance.new('ScrollingFrame')
+scriptsPanel.Name = 'ScriptsPanel'
+scriptsPanel.Size = UDim2.new(1, -20, 1, -20)
+scriptsPanel.Position = UDim2.new(0, 10, 0, 10)
+scriptsPanel.BackgroundTransparency = 1
+scriptsPanel.BorderSizePixel = 0
+scriptsPanel.ScrollBarThickness = 8
+scriptsPanel.ScrollBarImageColor3 = Color3.fromRGB(200, 162, 200)
+scriptsPanel.ZIndex = 7
+scriptsPanel.Parent = mainPanel
 
-        for i, part in ipairs(rangeCircleParts) do
-            local angle = angleStep * (i - 1)
-            local x = centerPos.X + math.cos(angle) * settings.range
-            local z = centerPos.Z + math.sin(angle) * settings.range
-            local y = centerPos.Y - 1 -- Slightly below player
+local logPanel = Instance.new('ScrollingFrame')
+logPanel.Name = 'LogPanel'
+logPanel.Size = UDim2.new(1, -20, 1, -20)
+logPanel.Position = UDim2.new(0, 10, 0, 10)
+logPanel.BackgroundTransparency = 1
+logPanel.BorderSizePixel = 0
+logPanel.ScrollBarThickness = 8
+logPanel.ScrollBarImageColor3 = Color3.fromRGB(200, 162, 200)
+logPanel.ZIndex = 7
+logPanel.Visible = false
+logPanel.Parent = mainPanel
 
-            part.CFrame = CFrame.new(x, y, z)
+local settingsPanel = Instance.new('ScrollingFrame')
+settingsPanel.Name = 'SettingsPanel'
+settingsPanel.Size = UDim2.new(1, -20, 1, -20)
+settingsPanel.Position = UDim2.new(0, 10, 0, 10)
+settingsPanel.BackgroundTransparency = 1
+settingsPanel.BorderSizePixel = 0
+settingsPanel.ScrollBarThickness = 8
+settingsPanel.ScrollBarImageColor3 = Color3.fromRGB(200, 162, 200)
+settingsPanel.ZIndex = 7
+settingsPanel.Visible = false
+settingsPanel.Parent = mainPanel
 
-            -- Make the part face the next segment to create a continuous outline
-            local nextAngle = angleStep * i
-            local nextX = centerPos.X + math.cos(nextAngle) * settings.range
-            local nextZ = centerPos.Z + math.sin(nextAngle) * settings.range
+-- Store references to script cards and buttons for easy updating
+local scriptElements = {}
 
-            part.CFrame = CFrame.lookAt(
-                Vector3.new(x, y, z),
-                Vector3.new(nextX, y, nextZ)
-            )
+-- Update all checkmarks/buttons safely
+local function updateAllCheckmarks()
+    for scriptName, elements in pairs(scriptElements) do
+        local isExecuted = tracker:hasExecuted(scriptName)
 
-            -- Adjust size based on segment length
-            local segmentLength = 2 * settings.range * math.sin(angleStep / 2)
-            part.Size = Vector3.new(segmentLength, 2, 5)
-        end
-    end
-end
+        if elements.card and elements.card.Parent then
+            local existingCheckmark = elements.card:FindFirstChild('CheckMark')
+            if existingCheckmark then
+                existingCheckmark:Destroy()
+            end
 
--- Clear range circle
-local function clearRangeCircle()
-    for _, part in pairs(rangeCircleParts) do
-        if part then
-            part:Destroy()
-        end
-    end
-    rangeCircleParts = {}
-end
+            if isExecuted then
+                local checkMark = Instance.new('TextLabel')
+                checkMark.Name = 'CheckMark'
+                checkMark.Size = UDim2.new(0, 30, 0, 30)
+                checkMark.Position = UDim2.new(1, -50, 0, 10)
+                checkMark.BackgroundTransparency = 1
+                checkMark.Text = '✅'
+                checkMark.TextColor3 = Color3.fromRGB(16, 185, 129)
+                checkMark.TextScaled = true
+                checkMark.ZIndex = 9
+                checkMark.Parent = elements.card
+            end
 
--- Create highlight for a part
-local function createHighlight(originalPart)
-    local highlight = Instance.new('Part')
-    highlight.Name = 'EnemyHighlight'
-    highlight.Size = Vector3.new(
-        settings.hitboxSize,
-        settings.hitboxSize,
-        settings.hitboxSize
-    )
-    highlight.CFrame = originalPart.CFrame
-    highlight.Anchored = false
-    highlight.CanCollide = false
-    highlight.Material = Enum.Material.ForceField
-    highlight.BrickColor = BrickColor.new(settings.highlightColor)
-    highlight.Transparency = settings.transparency
-    highlight.Shape = Enum.PartType.Block -- Ensure it's a cube
-    highlight.Parent = originalPart
-
-    -- Create weld to attach to original part
-    local weld = Instance.new('WeldConstraint')
-    weld.Part0 = originalPart
-    weld.Part1 = highlight
-    weld.Parent = highlight
-
-    return highlight
-end
-
--- Update all highlights
-local function updateHighlights()
-    for original, highlight in pairs(highlightedParts) do
-        if highlight and highlight.Parent then
-            highlight.Size = Vector3.new(
-                settings.hitboxSize,
-                settings.hitboxSize,
-                settings.hitboxSize
-            )
-            highlight.BrickColor = BrickColor.new(settings.highlightColor)
-            highlight.Transparency = settings.transparency
-        end
-    end
-end
-
--- Clear all highlights
-local function clearHighlights()
-    for _, highlight in pairs(highlightedParts) do
-        if highlight then
-            highlight:Destroy()
-        end
-    end
-    highlightedParts = {}
-end
-
--- Main update loop
-local function updateEnemies()
-    if not settings.enabled then
-        clearHighlights()
-        return
-    end
-
-    local character = LocalPlayer.Character
-    if not character or not character:FindFirstChild('HumanoidRootPart') then
-        return
-    end
-
-    local playerPos = character.HumanoidRootPart.Position
-    local enemiesFolder = Workspace:FindFirstChild('Enemies')
-
-    if not enemiesFolder then
-        return
-    end
-
-    -- Track current enemies
-    local currentEnemies = {}
-
-    for _, enemy in pairs(enemiesFolder:GetChildren()) do
-        local humanoidRootPart = enemy:FindFirstChild('HumanoidRootPart')
-        if humanoidRootPart then
-            local distance = (humanoidRootPart.Position - playerPos).Magnitude
-
-            if distance <= settings.range then
-                currentEnemies[humanoidRootPart] = true
-
-                -- Create highlight if doesn't exist
-                if not highlightedParts[humanoidRootPart] then
-                    local existingHighlight =
-                        humanoidRootPart:FindFirstChild('EnemyHighlight')
-                    if existingHighlight then
-                        existingHighlight:Destroy()
-                    end
-                    highlightedParts[humanoidRootPart] =
-                        createHighlight(humanoidRootPart)
+            if elements.executeButton and elements.executeButton.Parent then
+                if isExecuted then
+                    elements.executeButton.Text = 'Executed'
+                    elements.executeButton.BackgroundColor3 =
+                        Color3.fromRGB(245, 158, 11)
+                else
+                    elements.executeButton.Text = '⚡ Execute'
+                    elements.executeButton.BackgroundColor3 =
+                        Color3.fromRGB(200, 162, 200)
                 end
             end
         end
     end
-
-    -- Remove highlights for enemies out of range or destroyed
-    for part, highlight in pairs(highlightedParts) do
-        if not currentEnemies[part] or not part.Parent then
-            if highlight then
-                highlight:Destroy()
-            end
-            highlightedParts[part] = nil
-        end
-    end
-
-    -- Update range circle
-    updateRangeCircle()
 end
 
--- Toggle system
-ToggleButton.MouseButton1Click:Connect(function()
-    settings.enabled = not settings.enabled
-
-    if settings.enabled then
-        ToggleButton.Text = 'Enabled'
-        ToggleButton.BackgroundColor3 = Color3.fromRGB(100, 200, 100)
-
-        if settings.showRangeCircle then
-            createRangeCircle()
-        end
-
-        if not updateConnection then
-            updateConnection = RunService.Heartbeat:Connect(updateEnemies)
-        end
-    else
-        ToggleButton.Text = 'Disabled'
-        ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
-
-        clearHighlights()
-        clearRangeCircle()
-
-        if updateConnection then
-            updateConnection:Disconnect()
-            updateConnection = nil
-        end
-    end
-end)
-
--- Range Circle Toggle
-RangeCircleButton.MouseButton1Click:Connect(function()
-    settings.showRangeCircle = not settings.showRangeCircle
-
-    if settings.showRangeCircle then
-        RangeCircleButton.Text = 'Range Circle: ON'
-        RangeCircleButton.BackgroundColor3 = Color3.fromRGB(100, 200, 100)
-        if settings.enabled then
-            createRangeCircle()
-        end
-    else
-        RangeCircleButton.Text = 'Range Circle: OFF'
-        RangeCircleButton.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
-        clearRangeCircle()
-    end
-end)
-
--- Slider functionality
-local function setupSlider(
-    slider,
-    button,
-    minValue,
-    maxValue,
-    currentValue,
-    callback
-)
-    local sliderDragging = false
-
-    button.MouseButton1Down:Connect(function()
-        sliderDragging = true
-    end)
-
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            sliderDragging = false
-        end
-    end)
-
-    UserInputService.InputChanged:Connect(function(input)
-        if
-            sliderDragging
-            and input.UserInputType == Enum.UserInputType.MouseMovement
-        then
-            local mouse = LocalPlayer:GetMouse()
-            local relativeX = mouse.X - slider.AbsolutePosition.X
-            local percentage =
-                math.clamp(relativeX / slider.AbsoluteSize.X, 0, 1)
-
-            button.Position = UDim2.new(percentage, -10, 0, 0)
-
-            local value = minValue + (maxValue - minValue) * percentage
-            callback(value)
-        end
-    end)
-end
-
--- Setup range slider
-setupSlider(
-    RangeSlider,
-    RangeSliderButton,
-    100,
-    3000,
-    settings.range,
-    function(value)
-        settings.range = math.floor(value)
-        RangeLabel.Text = 'Range: ' .. settings.range .. ' studs'
-        updateRangeCircle()
-    end
-)
-
--- Setup size slider (1 to 100 for cube size)
-setupSlider(
-    SizeSlider,
-    SizeSliderButton,
-    1,
-    100,
-    settings.hitboxSize,
-    function(value)
-        settings.hitboxSize = math.floor(value)
-        SizeLabel.Text = 'Hitbox Size: '
-            .. settings.hitboxSize
-            .. ' x '
-            .. settings.hitboxSize
-            .. ' x '
-            .. settings.hitboxSize
-        updateHighlights()
-    end
-)
-
--- Notification
-game.StarterGui:SetCore('SendNotification', {
-    Title = 'Enemy Expander',
-    Text = 'Draggable GUI Controls Ready',
-    Duration = 3,
-})
-
--- Waypoint System with GUI Manager
--- Press = to place waypoint, automatically places death markers
-
-local Players = game:GetService('Players')
-local UserInputService = game:GetService('UserInputService')
-local TweenService = game:GetService('TweenService')
-local RunService = game:GetService('RunService')
-local Workspace = game:GetService('Workspace')
-local LocalPlayer = Players.LocalPlayer
-
--- Configuration
-local WAYPOINT_KEY = Enum.KeyCode.Equals
-local WAYPOINT_COLOR = Color3.fromRGB(100, 200, 255)
-local DEATH_COLOR = Color3.fromRGB(255, 100, 100)
-local WAYPOINT_SIZE = Vector3.new(4, 4, 4)
-local BEAM_HEIGHT = 1000
-
--- Storage
-local waypoints = {}
-local waypointCounter = 1
-local deathCounter = 1
-local waypointFolder = nil
-local guiOpen = false
-
--- Create waypoint folder in workspace
-local function createWaypointFolder()
-    waypointFolder = Workspace:FindFirstChild('PlayerWaypoints')
-    if not waypointFolder then
-        waypointFolder = Instance.new('Folder')
-        waypointFolder.Name = 'PlayerWaypoints'
-        waypointFolder.Parent = Workspace
-    end
-end
-
--- Create main GUI
-local ScreenGui = Instance.new('ScreenGui')
-ScreenGui.Name = 'WaypointSystemGUI'
-ScreenGui.ResetOnSpawn = false
-ScreenGui.Parent = game:GetService('CoreGui')
-
--- Toggle button (always visible)
-local ToggleButton = Instance.new('TextButton')
-ToggleButton.Size = UDim2.new(0, 150, 0, 40)
-ToggleButton.Position = UDim2.new(0, 10, 0.5, -20)
-ToggleButton.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-ToggleButton.BorderSizePixel = 0
-ToggleButton.Text = 'Waypoints [=]'
-ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-ToggleButton.TextScaled = true
-ToggleButton.Font = Enum.Font.SourceSansBold
-ToggleButton.Parent = ScreenGui
-
-local ToggleCorner = Instance.new('UICorner')
-ToggleCorner.CornerRadius = UDim.new(0, 8)
-ToggleCorner.Parent = ToggleButton
-
--- Main frame (hidden initially)
-local MainFrame = Instance.new('Frame')
-MainFrame.Size = UDim2.new(0, 400, 0, 500)
-MainFrame.Position = UDim2.new(0.5, -200, 0.5, -250)
-MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-MainFrame.BorderSizePixel = 0
-MainFrame.Visible = false
-MainFrame.Parent = ScreenGui
-
-local MainCorner = Instance.new('UICorner')
-MainCorner.CornerRadius = UDim.new(0, 12)
-MainCorner.Parent = MainFrame
-
--- Title bar
-local TitleBar = Instance.new('Frame')
-TitleBar.Size = UDim2.new(1, 0, 0, 40)
-TitleBar.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-TitleBar.BorderSizePixel = 0
-TitleBar.Parent = MainFrame
-
-local TitleCorner = Instance.new('UICorner')
-TitleCorner.CornerRadius = UDim.new(0, 12)
-TitleCorner.Parent = TitleBar
-
-local TitleLabel = Instance.new('TextLabel')
-TitleLabel.Size = UDim2.new(1, -40, 1, 0)
-TitleLabel.Position = UDim2.new(0, 10, 0, 0)
-TitleLabel.BackgroundTransparency = 1
-TitleLabel.Text = 'Waypoint Manager'
-TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-TitleLabel.TextScaled = true
-TitleLabel.Font = Enum.Font.SourceSansBold
-TitleLabel.Parent = TitleBar
-
-local CloseButton = Instance.new('TextButton')
-CloseButton.Size = UDim2.new(0, 30, 0, 30)
-CloseButton.Position = UDim2.new(1, -35, 0, 5)
-CloseButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
-CloseButton.Text = 'X'
-CloseButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-CloseButton.TextScaled = true
-CloseButton.Font = Enum.Font.SourceSansBold
-CloseButton.Parent = TitleBar
-
-local CloseCorner = Instance.new('UICorner')
-CloseCorner.CornerRadius = UDim.new(0, 6)
-CloseCorner.Parent = CloseButton
-
--- Scrolling frame for waypoint list
-local ScrollFrame = Instance.new('ScrollingFrame')
-ScrollFrame.Size = UDim2.new(1, -20, 1, -50)
-ScrollFrame.Position = UDim2.new(0, 10, 0, 45)
-ScrollFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-ScrollFrame.BorderSizePixel = 0
-ScrollFrame.ScrollBarThickness = 6
-ScrollFrame.Parent = MainFrame
-
-local ScrollCorner = Instance.new('UICorner')
-ScrollCorner.CornerRadius = UDim.new(0, 8)
-ScrollCorner.Parent = ScrollFrame
-
-local UIListLayout = Instance.new('UIListLayout')
-UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-UIListLayout.Padding = UDim.new(0, 5)
-UIListLayout.Parent = ScrollFrame
-
--- Create waypoint visual
-local function createWaypointVisual(position, name, color)
-    local waypointModel = Instance.new('Model')
-    waypointModel.Name = name
-    waypointModel.Parent = waypointFolder
-
-    -- Base part
-    local basePart = Instance.new('Part')
-    basePart.Name = 'Base'
-    basePart.Size = WAYPOINT_SIZE
-    basePart.Position = position
-    basePart.Anchored = true
-    basePart.CanCollide = false
-    basePart.Material = Enum.Material.ForceField
-    basePart.BrickColor = BrickColor.new(color)
-    basePart.Transparency = 0.3
-    basePart.Shape = Enum.PartType.Ball
-    basePart.Parent = waypointModel
-
-    -- Beam part (vertical line)
-    local beamPart = Instance.new('Part')
-    beamPart.Name = 'Beam'
-    beamPart.Size = Vector3.new(0.5, BEAM_HEIGHT, 0.5)
-    beamPart.Position = position + Vector3.new(0, BEAM_HEIGHT / 2, 0)
-    beamPart.Anchored = true
-    beamPart.CanCollide = false
-    beamPart.Material = Enum.Material.Neon
-    beamPart.BrickColor = BrickColor.new(color)
-    beamPart.Transparency = 0.5
-    beamPart.Parent = waypointModel
-
-    -- Billboard GUI
-    local billboardGui = Instance.new('BillboardGui')
-    billboardGui.Size = UDim2.new(0, 150, 0, 50)
-    billboardGui.StudsOffset = Vector3.new(0, 5, 0)
-    billboardGui.AlwaysOnTop = true
-    billboardGui.Parent = basePart
-
-    local nameLabel = Instance.new('TextLabel')
-    nameLabel.Size = UDim2.new(1, 0, 1, 0)
-    nameLabel.BackgroundTransparency = 0.3
-    nameLabel.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-    nameLabel.Text = name
-    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    nameLabel.TextScaled = true
-    nameLabel.Font = Enum.Font.SourceSansBold
-    nameLabel.Parent = billboardGui
-
-    local labelCorner = Instance.new('UICorner')
-    labelCorner.CornerRadius = UDim.new(0, 8)
-    labelCorner.Parent = nameLabel
-
-    return waypointModel
-end
-
--- Create waypoint entry in GUI
-local function createWaypointEntry(waypoint)
-    local entryFrame = Instance.new('Frame')
-    entryFrame.Size = UDim2.new(1, 0, 0, 60)
-    entryFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-    entryFrame.BorderSizePixel = 0
-    entryFrame.Parent = ScrollFrame
-
-    local entryCorner = Instance.new('UICorner')
-    entryCorner.CornerRadius = UDim.new(0, 8)
-    entryCorner.Parent = entryFrame
-
-    -- Waypoint name
-    local nameLabel = Instance.new('TextLabel')
-    nameLabel.Size = UDim2.new(0.4, 0, 0.5, 0)
-    nameLabel.Position = UDim2.new(0, 10, 0, 5)
-    nameLabel.BackgroundTransparency = 1
-    nameLabel.Text = waypoint.name
-    nameLabel.TextColor3 = waypoint.isDeath and DEATH_COLOR or WAYPOINT_COLOR
-    nameLabel.TextScaled = true
-    nameLabel.Font = Enum.Font.SourceSansBold
-    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
-    nameLabel.Parent = entryFrame
-
-    -- Position label
-    local posLabel = Instance.new('TextLabel')
-    posLabel.Size = UDim2.new(0.4, 0, 0.4, 0)
-    posLabel.Position = UDim2.new(0, 10, 0.5, 0)
-    posLabel.BackgroundTransparency = 1
-    posLabel.Text = string.format(
-        '(%.0f, %.0f, %.0f)',
-        waypoint.position.X,
-        waypoint.position.Y,
-        waypoint.position.Z
-    )
-    posLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
-    posLabel.TextScaled = true
-    posLabel.Font = Enum.Font.SourceSans
-    posLabel.TextXAlignment = Enum.TextXAlignment.Left
-    posLabel.Parent = entryFrame
-
-    -- View button
-    local viewButton = Instance.new('TextButton')
-    viewButton.Size = UDim2.new(0, 50, 0, 30)
-    viewButton.Position = UDim2.new(1, -180, 0.5, -15)
-    viewButton.BackgroundColor3 = waypoint.visible
-            and Color3.fromRGB(100, 200, 100)
-        or Color3.fromRGB(100, 100, 100)
-    viewButton.Text = waypoint.visible and 'Hide' or 'Show'
-    viewButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    viewButton.TextScaled = true
-    viewButton.Font = Enum.Font.SourceSans
-    viewButton.Parent = entryFrame
-
-    local viewCorner = Instance.new('UICorner')
-    viewCorner.CornerRadius = UDim.new(0, 6)
-    viewCorner.Parent = viewButton
-
-    -- Teleport button
-    local tpButton = Instance.new('TextButton')
-    tpButton.Size = UDim2.new(0, 50, 0, 30)
-    tpButton.Position = UDim2.new(1, -120, 0.5, -15)
-    tpButton.BackgroundColor3 = Color3.fromRGB(100, 150, 255)
-    tpButton.Text = 'TP'
-    tpButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    tpButton.TextScaled = true
-    tpButton.Font = Enum.Font.SourceSans
-    tpButton.Parent = entryFrame
-
-    local tpCorner = Instance.new('UICorner')
-    tpCorner.CornerRadius = UDim.new(0, 6)
-    tpCorner.Parent = tpButton
-
-    -- Delete button
-    local deleteButton = Instance.new('TextButton')
-    deleteButton.Size = UDim2.new(0, 50, 0, 30)
-    deleteButton.Position = UDim2.new(1, -60, 0.5, -15)
-    deleteButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
-    deleteButton.Text = 'X'
-    deleteButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    deleteButton.TextScaled = true
-    deleteButton.Font = Enum.Font.SourceSansBold
-    deleteButton.Parent = entryFrame
-
-    local deleteCorner = Instance.new('UICorner')
-    deleteCorner.CornerRadius = UDim.new(0, 6)
-    deleteCorner.Parent = deleteButton
-
-    -- Button functions
-    viewButton.MouseButton1Click:Connect(function()
-        waypoint.visible = not waypoint.visible
-        waypoint.visual.Parent = waypoint.visible and waypointFolder or nil
-        viewButton.Text = waypoint.visible and 'Hide' or 'Show'
-        viewButton.BackgroundColor3 = waypoint.visible
-                and Color3.fromRGB(100, 200, 100)
-            or Color3.fromRGB(100, 100, 100)
-    end)
-
-    tpButton.MouseButton1Click:Connect(function()
-        local character = LocalPlayer.Character
-        if character and character:FindFirstChild('HumanoidRootPart') then
-            character.HumanoidRootPart.CFrame =
-                CFrame.new(waypoint.position + Vector3.new(0, 5, 0))
-        end
-    end)
-
-    deleteButton.MouseButton1Click:Connect(function()
-        -- Remove from waypoints table
-        for i, wp in ipairs(waypoints) do
-            if wp == waypoint then
-                table.remove(waypoints, i)
-                break
-            end
-        end
-
-        -- Destroy visual and GUI entry
-        if waypoint.visual then
-            waypoint.visual:Destroy()
-        end
-        entryFrame:Destroy()
-
-        -- Update scroll canvas size
-        ScrollFrame.CanvasSize =
-            UDim2.new(0, 0, 0, UIListLayout.AbsoluteContentSize.Y)
-    end)
-
-    waypoint.guiEntry = entryFrame
-
-    -- Update scroll canvas size
-    ScrollFrame.CanvasSize =
-        UDim2.new(0, 0, 0, UIListLayout.AbsoluteContentSize.Y)
-end
-
--- Create waypoint
-local function createWaypoint(position, name, isDeath)
-    local waypoint = {
-        name = name,
-        position = position,
-        isDeath = isDeath,
-        visible = true,
-        visual = createWaypointVisual(
-            position,
-            name,
-            isDeath and DEATH_COLOR or WAYPOINT_COLOR
-        ),
-    }
-
-    table.insert(waypoints, waypoint)
-    createWaypointEntry(waypoint)
-
-    return waypoint
-end
-
--- Place waypoint at current position
-local function placeWaypoint()
-    local character = LocalPlayer.Character
-    if character and character:FindFirstChild('HumanoidRootPart') then
-        local position = character.HumanoidRootPart.Position
-        local name = 'Waypoint ' .. waypointCounter
-        waypointCounter = waypointCounter + 1
-
-        createWaypoint(position, name, false)
-
-        -- Notification
-        game.StarterGui:SetCore('SendNotification', {
-            Title = 'Waypoint Placed',
-            Text = name .. ' at current position',
-            Duration = 2,
-        })
-    end
-end
-
--- Place death waypoint
-local function placeDeathWaypoint(position)
-    local name = 'Death ' .. deathCounter
-    deathCounter = deathCounter + 1
-
-    createWaypoint(position, name, true)
-
-    -- Notification
-    game.StarterGui:SetCore('SendNotification', {
-        Title = 'Death Marker',
-        Text = name .. ' placed',
-        Duration = 2,
-    })
-end
-
--- Toggle GUI
-local function toggleGUI()
-    guiOpen = not guiOpen
-    MainFrame.Visible = guiOpen
-
-    if guiOpen then
-        -- Refresh GUI
-        for _, child in pairs(ScrollFrame:GetChildren()) do
-            if child:IsA('Frame') then
+-- Refresh log display
+local function refreshLogDisplay()
+    if logPanel and logPanel.Parent then
+        for _, child in ipairs(logPanel:GetChildren()) do
+            if
+                child
+                and (
+                    child:IsA('Frame')
+                    or child:IsA('TextButton')
+                    or child:IsA('TextLabel')
+                )
+            then
                 child:Destroy()
             end
         end
+    end
 
-        for _, waypoint in ipairs(waypoints) do
-            createWaypointEntry(waypoint)
+    local log = tracker and tracker:getExecutionLog() or {}
+    local yPos = 10
+    local hasLogs = false
+
+    if log then
+        for _ in pairs(log) do
+            hasLogs = true
+            break
         end
+    end
+
+    if hasLogs and logPanel and logPanel.Parent then
+        for scriptName, data in pairs(log) do
+            if scriptName and data and data.date and data.executor then
+                local logItem = Instance.new('Frame')
+                logItem.Size = UDim2.new(1, -20, 0, 80)
+                logItem.Position = UDim2.new(0, 10, 0, yPos)
+                logItem.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+                logItem.BackgroundTransparency = 0.92
+                logItem.BorderSizePixel = 0
+                logItem.ZIndex = 8
+                logItem.Parent = logPanel
+
+                local corner = Instance.new('UICorner')
+                corner.CornerRadius = UDim.new(0, 12)
+                corner.Parent = logItem
+
+                local nameLabel = Instance.new('TextLabel')
+                nameLabel.Size = UDim2.new(1, -120, 0, 30)
+                nameLabel.Position = UDim2.new(0, 15, 0, 5)
+                nameLabel.BackgroundTransparency = 1
+                nameLabel.Text = tostring(scriptName)
+                nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+                nameLabel.TextScaled = true
+                nameLabel.Font = Enum.Font.SourceSansBold
+                nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+                nameLabel.ZIndex = 9
+                nameLabel.Parent = logItem
+
+                local infoLabel = Instance.new('TextLabel')
+                infoLabel.Size = UDim2.new(1, -120, 0, 20)
+                infoLabel.Position = UDim2.new(0, 15, 0, 30)
+                infoLabel.BackgroundTransparency = 1
+                infoLabel.Text = 'Executed: ' .. tostring(data.date)
+                infoLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+                infoLabel.TextTransparency = 0.3
+                infoLabel.TextScaled = true
+                infoLabel.Font = Enum.Font.SourceSans
+                infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+                infoLabel.ZIndex = 9
+                infoLabel.Parent = logItem
+
+                local executorLabel = Instance.new('TextLabel')
+                executorLabel.Size = UDim2.new(1, -120, 0, 20)
+                executorLabel.Position = UDim2.new(0, 15, 0, 50)
+                executorLabel.BackgroundTransparency = 1
+                executorLabel.Text = 'Executor: ' .. tostring(data.executor)
+                executorLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+                executorLabel.TextTransparency = 0.3
+                executorLabel.TextScaled = true
+                executorLabel.Font = Enum.Font.SourceSans
+                executorLabel.TextXAlignment = Enum.TextXAlignment.Left
+                executorLabel.ZIndex = 9
+                executorLabel.Parent = logItem
+
+                local clearButton = Instance.new('TextButton')
+                clearButton.Size = UDim2.new(0, 80, 0, 25)
+                clearButton.Position = UDim2.new(1, -90, 0.5, -12.5)
+                clearButton.BackgroundColor3 = Color3.fromRGB(200, 162, 200)
+                clearButton.BackgroundTransparency = 0.2
+                clearButton.BorderSizePixel = 0
+                clearButton.Text = '🗑️ Clear'
+                clearButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+                clearButton.TextScaled = true
+                clearButton.Font = Enum.Font.SourceSansBold
+                clearButton.ZIndex = 9
+                clearButton.Parent = logItem
+
+                local clearCorner = Instance.new('UICorner')
+                clearCorner.CornerRadius = UDim.new(0, 6)
+                clearCorner.Parent = clearButton
+
+                local clearGradient = Instance.new('UIGradient')
+                clearGradient.Color = ColorSequence.new({
+                    ColorSequenceKeypoint.new(0, Color3.fromRGB(200, 162, 200)),
+                    ColorSequenceKeypoint.new(1, Color3.fromRGB(173, 216, 230)),
+                })
+                clearGradient.Rotation = 45
+                clearGradient.Parent = clearButton
+
+                local capturedScriptName = scriptName
+                clearButton.MouseButton1Click:Connect(function()
+                    if
+                        tracker
+                        and capturedScriptName
+                        and tracker:clearExecution(capturedScriptName)
+                    then
+                        createNotification(
+                            'Cleared',
+                            capturedScriptName .. ' removed from log',
+                            '🗑️',
+                            Color3.fromRGB(16, 185, 129)
+                        )
+                        task.spawn(function()
+                            refreshLogDisplay()
+                            task.wait(0.1)
+                            updateAllCheckmarks()
+                        end)
+                    end
+                end)
+
+                yPos = yPos + 90
+            end
+        end
+
+        if yPos > 10 then
+            local clearAllButton = Instance.new('TextButton')
+            clearAllButton.Size = UDim2.new(0, 150, 0, 40)
+            clearAllButton.Position = UDim2.new(0.5, -75, 0, yPos + 20)
+            clearAllButton.BackgroundColor3 = Color3.fromRGB(200, 162, 200)
+            clearAllButton.BackgroundTransparency = 0.2
+            clearAllButton.BorderSizePixel = 0
+            clearAllButton.Text = '🗑️ Clear All Logs'
+            clearAllButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+            clearAllButton.TextScaled = true
+            clearAllButton.Font = Enum.Font.SourceSansBold
+            clearAllButton.ZIndex = 8
+            clearAllButton.Parent = logPanel
+
+            local clearAllCorner = Instance.new('UICorner')
+            clearAllCorner.CornerRadius = UDim.new(0, 12)
+            clearAllCorner.Parent = clearAllButton
+
+            local clearAllGradient = Instance.new('UIGradient')
+            clearAllGradient.Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, Color3.fromRGB(200, 162, 200)),
+                ColorSequenceKeypoint.new(1, Color3.fromRGB(173, 216, 230)),
+            })
+            clearAllGradient.Rotation = 45
+            clearAllGradient.Parent = clearAllButton
+
+            clearAllButton.MouseButton1Click:Connect(function()
+                if tracker then
+                    tracker:clearAllExecutions()
+                    createNotification(
+                        'All Cleared',
+                        'All execution logs cleared',
+                        '🗑️',
+                        Color3.fromRGB(16, 185, 129)
+                    )
+                    task.spawn(function()
+                        refreshLogDisplay()
+                        task.wait(0.1)
+                        updateAllCheckmarks()
+                    end)
+                end
+            end)
+
+            yPos = yPos + 80
+        end
+    end
+
+    if logPanel and logPanel.Parent then
+        logPanel.CanvasSize = UDim2.new(0, 0, 0, yPos + 20)
     end
 end
 
--- Setup death detection
-local function setupDeathDetection()
-    local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    local humanoid = character:WaitForChild('Humanoid')
-
-    local deathPosition = nil
-
-    -- Store position when health reaches 0
-    humanoid.Died:Connect(function()
-        if character:FindFirstChild('HumanoidRootPart') then
-            deathPosition = character.HumanoidRootPart.Position
-        end
-    end)
-
-    -- Place waypoint when respawning
-    LocalPlayer.CharacterAdded:Connect(function(newCharacter)
-        if deathPosition then
-            wait(0.5) -- Small delay to ensure character loads
-            placeDeathWaypoint(deathPosition)
-            deathPosition = nil
-        end
-
-        -- Setup for next death
-        setupDeathDetection()
-    end)
-end
-
--- Input handling
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then
+-- Create settings content once
+local settingsCreated = false
+local function createSettingsContent()
+    if settingsCreated then
         return
     end
+    settingsCreated = true
 
-    if input.KeyCode == WAYPOINT_KEY then
-        placeWaypoint()
+    local yPos = 20
+
+    local title = Instance.new('TextLabel')
+    title.Size = UDim2.new(1, 0, 0, 40)
+    title.Position = UDim2.new(0, 0, 0, yPos)
+    title.BackgroundTransparency = 1
+    title.Text = 'Hub Settings'
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextScaled = true
+    title.Font = Enum.Font.SourceSansBold
+    title.ZIndex = 8
+    title.Parent = settingsPanel
+
+    yPos = yPos + 60
+
+    local execInfo = Instance.new('Frame')
+    execInfo.Size = UDim2.new(1, -20, 0, 100)
+    execInfo.Position = UDim2.new(0, 10, 0, yPos)
+    execInfo.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    execInfo.BackgroundTransparency = 0.92
+    execInfo.BorderSizePixel = 0
+    execInfo.ZIndex = 8
+    execInfo.Parent = settingsPanel
+
+    local execCorner = Instance.new('UICorner')
+    execCorner.CornerRadius = UDim.new(0, 12)
+    execCorner.Parent = execInfo
+
+    local execLabel = Instance.new('TextLabel')
+    execLabel.Size = UDim2.new(1, -20, 0, 30)
+    execLabel.Position = UDim2.new(0, 10, 0, 10)
+    execLabel.BackgroundTransparency = 1
+    execLabel.Text = 'Current Executor'
+    execLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    execLabel.TextScaled = true
+    execLabel.Font = Enum.Font.SourceSansBold
+    execLabel.TextXAlignment = Enum.TextXAlignment.Left
+    execLabel.ZIndex = 9
+    execLabel.Parent = execInfo
+
+    local execValue = Instance.new('TextLabel')
+    execValue.Size = UDim2.new(1, -20, 0, 50)
+    execValue.Position = UDim2.new(0, 10, 0, 40)
+    execValue.BackgroundTransparency = 1
+    execValue.Text = getExecutorName()
+    execValue.TextColor3 = Color3.fromRGB(200, 162, 200)
+    execValue.TextScaled = true
+    execValue.Font = Enum.Font.SourceSans
+    execValue.TextXAlignment = Enum.TextXAlignment.Left
+    execValue.ZIndex = 9
+    execValue.Parent = execInfo
+
+    local execTextGradient = Instance.new('UIGradient')
+    execTextGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(200, 162, 200)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(173, 216, 230)),
+    })
+    execTextGradient.Rotation = 45
+    execTextGradient.Parent = execValue
+
+    yPos = yPos + 120
+
+    local statsFrame = Instance.new('Frame')
+    statsFrame.Size = UDim2.new(1, -20, 0, 120)
+    statsFrame.Position = UDim2.new(0, 10, 0, yPos)
+    statsFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    statsFrame.BackgroundTransparency = 0.92
+    statsFrame.BorderSizePixel = 0
+    statsFrame.ZIndex = 8
+    statsFrame.Parent = settingsPanel
+
+    local statsCorner = Instance.new('UICorner')
+    statsCorner.CornerRadius = UDim.new(0, 12)
+    statsCorner.Parent = statsFrame
+
+    local statsTitle = Instance.new('TextLabel')
+    statsTitle.Size = UDim2.new(1, -20, 0, 30)
+    statsTitle.Position = UDim2.new(0, 10, 0, 10)
+    statsTitle.BackgroundTransparency = 1
+    statsTitle.Text = 'Hub Statistics'
+    statsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+    statsTitle.TextScaled = true
+    statsTitle.Font = Enum.Font.SourceSansBold
+    statsTitle.TextXAlignment = Enum.TextXAlignment.Left
+    statsTitle.ZIndex = 9
+    statsTitle.Parent = statsFrame
+
+    local execCount = 0
+    for _ in pairs(tracker:getExecutionLog()) do
+        execCount += 1
     end
+
+    local statsText = Instance.new('TextLabel')
+    statsText.Size = UDim2.new(1, -20, 0, 70)
+    statsText.Position = UDim2.new(0, 10, 0, 40)
+    statsText.BackgroundTransparency = 1
+    statsText.Text = string.format(
+        'Scripts Available: %d\nScripts Executed: %d\nHub Version: v2.2',
+        #SCRIPTS,
+        execCount
+    )
+    statsText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    statsText.TextTransparency = 0.3
+    statsText.TextScaled = true
+    statsText.Font = Enum.Font.SourceSans
+    statsText.TextXAlignment = Enum.TextXAlignment.Left
+    statsText.TextYAlignment = Enum.TextYAlignment.Top
+    statsText.ZIndex = 9
+    statsText.Parent = statsFrame
+
+    settingsPanel.CanvasSize = UDim2.new(0, 0, 0, yPos + 140)
+end
+
+-- Build script cards
+local categories = {}
+local yPosition = 0
+
+for _, script in ipairs(SCRIPTS) do
+    if not categories[script.category] then
+        categories[script.category] = true
+
+        local categoryHeader = Instance.new('TextLabel')
+        categoryHeader.Size = UDim2.new(1, 0, 0, 40)
+        categoryHeader.Position = UDim2.new(0, 0, 0, yPosition)
+        categoryHeader.BackgroundTransparency = 1
+        categoryHeader.Text = script.category
+        categoryHeader.TextColor3 = Color3.fromRGB(255, 255, 255)
+        categoryHeader.TextScaled = true
+        categoryHeader.Font = Enum.Font.SourceSansBold
+        categoryHeader.TextXAlignment = Enum.TextXAlignment.Left
+        categoryHeader.ZIndex = 8
+        categoryHeader.Parent = scriptsPanel
+
+        yPosition = yPosition + 50
+    end
+
+    local scriptCard = Instance.new('Frame')
+    scriptCard.Size = UDim2.new(1, -20, 0, 120)
+    scriptCard.Position = UDim2.new(0, 10, 0, yPosition)
+    scriptCard.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    scriptCard.BackgroundTransparency = 0.92
+    scriptCard.BorderSizePixel = 0
+    scriptCard.ZIndex = 8
+    scriptCard.Parent = scriptsPanel
+
+    local corner = Instance.new('UICorner')
+    corner.CornerRadius = UDim.new(0, 12)
+    corner.Parent = scriptCard
+
+    local border = Instance.new('UIStroke')
+    border.Color = Color3.fromRGB(255, 255, 255)
+    border.Transparency = 0.8
+    border.Thickness = 1
+    border.Parent = scriptCard
+
+    local scriptIcon = Instance.new('TextLabel')
+    scriptIcon.Size = UDim2.new(0, 40, 0, 40)
+    scriptIcon.Position = UDim2.new(0, 15, 0, 15)
+    scriptIcon.BackgroundTransparency = 1
+    scriptIcon.Text = script.icon
+    scriptIcon.TextColor3 = Color3.fromRGB(255, 255, 255)
+    scriptIcon.TextScaled = true
+    scriptIcon.Font = Enum.Font.SourceSansBold
+    scriptIcon.ZIndex = 9
+    scriptIcon.Parent = scriptCard
+
+    local scriptName = Instance.new('TextLabel')
+    scriptName.Name = 'ScriptName'
+    scriptName.Size = UDim2.new(1, -180, 0, 30)
+    scriptName.Position = UDim2.new(0, 65, 0, 10)
+    scriptName.BackgroundTransparency = 1
+    scriptName.Text = script.name
+    scriptName.TextColor3 = Color3.fromRGB(255, 255, 255)
+    scriptName.TextScaled = true
+    scriptName.Font = Enum.Font.SourceSansBold
+    scriptName.TextXAlignment = Enum.TextXAlignment.Left
+    scriptName.ZIndex = 9
+    scriptName.Parent = scriptCard
+
+    local isExecuted = tracker:hasExecuted(script.name)
+    if isExecuted then
+        local checkMark = Instance.new('TextLabel')
+        checkMark.Name = 'CheckMark'
+        checkMark.Size = UDim2.new(0, 30, 0, 30)
+        checkMark.Position = UDim2.new(1, -50, 0, 10)
+        checkMark.BackgroundTransparency = 1
+        checkMark.Text = '✅'
+        checkMark.TextColor3 = Color3.fromRGB(16, 185, 129)
+        checkMark.TextScaled = true
+        checkMark.ZIndex = 9
+        checkMark.Parent = scriptCard
+    end
+
+    local scriptDesc = Instance.new('TextLabel')
+    scriptDesc.Size = UDim2.new(1, -80, 0, 40)
+    scriptDesc.Position = UDim2.new(0, 65, 0, 40)
+    scriptDesc.BackgroundTransparency = 1
+    scriptDesc.Text = script.description
+    scriptDesc.TextColor3 = Color3.fromRGB(255, 255, 255)
+    scriptDesc.TextTransparency = 0.3
+    scriptDesc.TextScaled = true
+    scriptDesc.Font = Enum.Font.SourceSans
+    scriptDesc.TextXAlignment = Enum.TextXAlignment.Left
+    scriptDesc.TextWrapped = true
+    scriptDesc.ZIndex = 9
+    scriptDesc.Parent = scriptCard
+
+    local executeButton = Instance.new('TextButton')
+    executeButton.Name = 'ExecuteButton'
+    executeButton.Size = UDim2.new(0, 100, 0, 30)
+    executeButton.Position = UDim2.new(0, 15, 1, -40)
+    executeButton.BackgroundColor3 = isExecuted and Color3.fromRGB(245, 158, 11)
+        or Color3.fromRGB(200, 162, 200)
+    executeButton.BackgroundTransparency = 0.2
+    executeButton.BorderSizePixel = 0
+    executeButton.Text = isExecuted and 'Executed' or '⚡ Execute'
+    executeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    executeButton.TextScaled = true
+    executeButton.Font = Enum.Font.SourceSansBold
+    executeButton.ZIndex = 9
+    executeButton.Parent = scriptCard
+
+    local execCorner = Instance.new('UICorner')
+    execCorner.CornerRadius = UDim.new(0, 8)
+    execCorner.Parent = executeButton
+
+    local execGradient = Instance.new('UIGradient')
+    execGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(200, 162, 200)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(173, 216, 230)),
+    })
+    execGradient.Rotation = 45
+    execGradient.Parent = executeButton
+
+    scriptElements[script.name] = {
+        card = scriptCard,
+        executeButton = executeButton,
+    }
+
+    executeButton.MouseButton1Click:Connect(function()
+        if tracker:hasExecuted(script.name) then
+            createNotification(
+                'Already Executed',
+                script.name .. ' has already been executed',
+                '⚠️',
+                Color3.fromRGB(245, 158, 11)
+            )
+            return
+        end
+
+        local ok, err = runRemoteScript(script.url)
+        if ok then
+            tracker:recordExecution(script.name)
+            createNotification(
+                'Success',
+                script.name .. ' executed successfully!',
+                '✅',
+                Color3.fromRGB(16, 185, 129)
+            )
+
+            executeButton.Text = 'Executed'
+            executeButton.BackgroundColor3 = Color3.fromRGB(245, 158, 11)
+
+            if not scriptCard:FindFirstChild('CheckMark') then
+                local checkMark = Instance.new('TextLabel')
+                checkMark.Name = 'CheckMark'
+                checkMark.Size = UDim2.new(0, 30, 0, 30)
+                checkMark.Position = UDim2.new(1, -50, 0, 10)
+                checkMark.BackgroundTransparency = 1
+                checkMark.Text = '✅'
+                checkMark.TextColor3 = Color3.fromRGB(16, 185, 129)
+                checkMark.TextScaled = true
+                checkMark.ZIndex = 9
+                checkMark.Parent = scriptCard
+            end
+
+            if currentTab == 'Execution Log' then
+                refreshLogDisplay()
+            end
+        else
+            createNotification(
+                'Execution Failed',
+                'Failed to execute ' .. script.name .. '\n' .. tostring(err),
+                '❌',
+                Color3.fromRGB(239, 68, 68)
+            )
+        end
+    end)
+
+    executeButton.MouseEnter:Connect(function()
+        TweenService
+            :Create(executeButton, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+                BackgroundTransparency = 0.1,
+                Size = UDim2.new(0, 105, 0, 32),
+            })
+            :Play()
+    end)
+
+    executeButton.MouseLeave:Connect(function()
+        TweenService
+            :Create(executeButton, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+                BackgroundTransparency = 0.2,
+                Size = UDim2.new(0, 100, 0, 30),
+            })
+            :Play()
+    end)
+
+    yPosition = yPosition + 140
+end
+
+scriptsPanel.CanvasSize = UDim2.new(0, 0, 0, yPosition)
+
+-- Tab switching functionality (nil-safe)
+for tabName, button in pairs(tabButtons) do
+    button.MouseButton1Click:Connect(function()
+        for name, btn in pairs(tabButtons) do
+            local stroke = btn:FindFirstChildWhichIsA('UIStroke')
+            local grad = btn:FindFirstChildWhichIsA('UIGradient')
+            if name == tabName then
+                btn.BackgroundTransparency = 0.3
+                btn.BackgroundColor3 = Color3.fromRGB(200, 162, 200)
+                if stroke then
+                    stroke.Transparency = 0.3
+                end
+                if grad then
+                    grad.Rotation = 45
+                end
+            else
+                btn.BackgroundTransparency = 0.6
+                btn.BackgroundColor3 = Color3.fromRGB(200, 162, 200)
+                if stroke then
+                    stroke.Transparency = 0.7
+                end
+                if grad then
+                    grad.Rotation = 90
+                end
+            end
+        end
+
+        scriptsPanel.Visible = (tabName == 'Scripts')
+        logPanel.Visible = (tabName == 'Execution Log')
+        settingsPanel.Visible = (tabName == 'Settings')
+
+        if tabName == 'Execution Log' then
+            refreshLogDisplay()
+        elseif tabName == 'Settings' then
+            createSettingsContent()
+        end
+
+        currentTab = tabName
+    end)
+end
+
+-- Close button
+local closeButton = Instance.new('TextButton')
+closeButton.Size = UDim2.new(0, 30, 0, 30)
+closeButton.Position = UDim2.new(1, -40, 0, 10)
+closeButton.BackgroundColor3 = Color3.fromRGB(200, 162, 200)
+closeButton.BackgroundTransparency = 0.2
+closeButton.BorderSizePixel = 0
+closeButton.Text = 'X'
+closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeButton.TextScaled = true
+closeButton.Font = Enum.Font.SourceSansBold
+closeButton.ZIndex = 12
+closeButton.Parent = header
+
+local closeCorner = Instance.new('UICorner')
+closeCorner.CornerRadius = UDim.new(1, 0)
+closeCorner.Parent = closeButton
+
+local closeGradient = Instance.new('UIGradient')
+closeGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(200, 162, 200)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(173, 216, 230)),
+})
+closeGradient.Rotation = 45
+closeGradient.Parent = closeButton
+
+closeButton.MouseButton1Click:Connect(function()
+    mainFrame.Visible = false
 end)
 
--- GUI button events
-ToggleButton.MouseButton1Click:Connect(toggleGUI)
-CloseButton.MouseButton1Click:Connect(function()
-    guiOpen = false
-    MainFrame.Visible = false
-end)
-
--- Make frame draggable
+-- Dragging
 local dragging = false
-local dragStart = nil
-local startPos = nil
+local dragStart, startPos
 
-TitleBar.InputBegan:Connect(function(input)
+header.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
         dragging = true
         dragStart = input.Position
-        startPos = MainFrame.Position
+        startPos = mainFrame.Position
+    end
+end)
+
+header.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+        mainFrame.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
     end
 end)
 
@@ -1578,1235 +1219,49 @@ UserInputService.InputEnded:Connect(function(input)
     end
 end)
 
-UserInputService.InputChanged:Connect(function(input)
-    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-        local delta = input.Position - dragStart
-        MainFrame.Position = UDim2.new(
-            startPos.X.Scale,
-            startPos.X.Offset + delta.X,
-            startPos.Y.Scale,
-            startPos.Y.Offset + delta.Y
-        )
-    end
-end)
-
--- Initialize
-createWaypointFolder()
-setupDeathDetection()
-
--- Notification
-game.StarterGui:SetCore('SendNotification', {
-    Title = 'Waypoint System Active',
-    Text = 'Press = to place waypoint',
-    Duration = 3,
-})
-
--- SirenRock Continuous Detection Script
--- Continuously monitors and places indicators on SirenRock objects within range
-
-local Players = game:GetService('Players')
-local Workspace = game:GetService('Workspace')
-local LocalPlayer = Players.LocalPlayer
-
--- Configuration
-local DETECTION_RANGE = 20000 -- Studs radius
-local UPDATE_RATE = 0.5 -- How often to scan for new SirenRocks and verify indicators
-local DISTANCE_UPDATE_RATE = 0.1 -- How often to update distance text
-
--- Storage for tracked SirenRocks
-local trackedRocks = {}
-
--- Get position from SirenRock (handles Models and Parts)
-local function getSirenRockPosition(sirenRock)
-    if sirenRock:IsA('Model') then
-        local primaryPart = sirenRock.PrimaryPart
-        if primaryPart then
-            return primaryPart.Position
-        else
-            -- Try to find any part in the model
-            local part = sirenRock:FindFirstChildWhichIsA('BasePart', true)
-            if part then
-                return part.Position
-            end
-        end
-    elseif sirenRock:IsA('BasePart') then
-        return sirenRock.Position
-    end
-    return nil
-end
-
--- Get the appropriate parent for the BillboardGui
-local function getGuiParent(sirenRock)
-    if sirenRock:IsA('Model') then
-        -- For models, try to use PrimaryPart or find first BasePart
-        if sirenRock.PrimaryPart then
-            return sirenRock.PrimaryPart
-        else
-            local part = sirenRock:FindFirstChildWhichIsA('BasePart', true)
-            if part then
-                return part
-            end
-        end
-    elseif sirenRock:IsA('BasePart') then
-        -- For parts, use the part directly
-        return sirenRock
-    end
-    return nil
-end
-
--- Check if indicator exists on the rock
-local function hasIndicator(sirenRock)
-    local guiParent = getGuiParent(sirenRock)
-    if guiParent then
-        return guiParent:FindFirstChild('SirenRockIndicator') ~= nil
-    end
-    return false
-end
-
--- Create distance indicator directly on SirenRock
-local function createIndicator(sirenRock)
-    local guiParent = getGuiParent(sirenRock)
-    if not guiParent then
-        return nil
-    end
-
-    -- Check if indicator already exists
-    local existingGui = guiParent:FindFirstChild('SirenRockIndicator')
-    if existingGui then
-        return {
-            Gui = existingGui,
-            DistanceLabel = existingGui
-                :FindFirstChild('Frame')
-                :FindFirstChild('DistanceText'),
-            SirenRock = sirenRock,
-            GuiParent = guiParent,
-        }
-    end
-
-    local BillboardGui = Instance.new('BillboardGui')
-    BillboardGui.Name = 'SirenRockIndicator'
-    BillboardGui.Size = UDim2.new(0, 200, 0, 100)
-    BillboardGui.StudsOffset = Vector3.new(0, 10, 0)
-    BillboardGui.AlwaysOnTop = true
-    BillboardGui.Parent = guiParent
-
-    local Frame = Instance.new('Frame')
-    Frame.Name = 'Frame'
-    Frame.Size = UDim2.new(1, 0, 1, 0)
-    Frame.BackgroundTransparency = 0.3
-    Frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-    Frame.BorderSizePixel = 0
-    Frame.Parent = BillboardGui
-
-    local FrameCorner = Instance.new('UICorner')
-    FrameCorner.CornerRadius = UDim.new(0, 8)
-    FrameCorner.Parent = Frame
-
-    local IconText = Instance.new('TextLabel')
-    IconText.Name = 'IconText'
-    IconText.Size = UDim2.new(1, 0, 0.4, 0)
-    IconText.Position = UDim2.new(0, 0, 0, 5)
-    IconText.BackgroundTransparency = 1
-    IconText.Text = '⚠️ SIREN ROCK'
-    IconText.TextColor3 = Color3.fromRGB(255, 100, 100)
-    IconText.TextScaled = true
-    IconText.Font = Enum.Font.SourceSansBold
-    IconText.Parent = Frame
-
-    local DistanceText = Instance.new('TextLabel')
-    DistanceText.Name = 'DistanceText'
-    DistanceText.Size = UDim2.new(1, 0, 0.5, 0)
-    DistanceText.Position = UDim2.new(0, 0, 0.4, 0)
-    DistanceText.BackgroundTransparency = 1
-    DistanceText.Text = '0 studs'
-    DistanceText.TextColor3 = Color3.fromRGB(255, 255, 255)
-    DistanceText.TextScaled = true
-    DistanceText.Font = Enum.Font.SourceSans
-    DistanceText.Parent = Frame
-
-    return {
-        Gui = BillboardGui,
-        DistanceLabel = DistanceText,
-        SirenRock = sirenRock,
-        GuiParent = guiParent,
-    }
-end
-
--- Find all SirenRocks in Workspace
-local function findAllSirenRocks()
-    local sirenRocks = {}
-
-    for _, descendant in pairs(Workspace:GetDescendants()) do
-        if descendant.Name == 'SirenRock' then
-            table.insert(sirenRocks, descendant)
-        end
-    end
-
-    return sirenRocks
-end
-
--- Main scanning loop
-local function scanningLoop()
-    while true do
-        local character = LocalPlayer.Character
-        if character and character:FindFirstChild('HumanoidRootPart') then
-            local playerPos = character.HumanoidRootPart.Position
-
-            -- Find all current SirenRocks
-            local currentRocks = findAllSirenRocks()
-
-            -- Process each found rock
-            for _, rock in pairs(currentRocks) do
-                local rockPos = getSirenRockPosition(rock)
-
-                if rockPos then
-                    local distance = (playerPos - rockPos).Magnitude
-
-                    if distance <= DETECTION_RANGE then
-                        -- Check if indicator exists on the rock
-                        if not hasIndicator(rock) then
-                            -- Create or recreate indicator
-                            local indicator = createIndicator(rock)
-                            if indicator then
-                                trackedRocks[rock] = indicator
-                                print(
-                                    'Created/Recreated indicator for SirenRock at distance: '
-                                        .. math.floor(distance)
-                                        .. ' studs'
-                                )
-                            end
-                        elseif not trackedRocks[rock] then
-                            -- Indicator exists but not in our tracking, add it
-                            local guiParent = getGuiParent(rock)
-                            if guiParent then
-                                local existingGui = guiParent:FindFirstChild(
-                                    'SirenRockIndicator'
-                                )
-                                if existingGui then
-                                    trackedRocks[rock] = {
-                                        Gui = existingGui,
-                                        DistanceLabel = existingGui
-                                            :FindFirstChild('Frame')
-                                            :FindFirstChild('DistanceText'),
-                                        SirenRock = rock,
-                                        GuiParent = guiParent,
-                                    }
-                                end
-                            end
-                        end
-
-                        -- Update indicator if it exists
-                        if
-                            trackedRocks[rock]
-                            and trackedRocks[rock].Gui.Parent
-                        then
-                            trackedRocks[rock].DistanceLabel.Text = math.floor(
-                                distance
-                            ) .. ' studs'
-
-                            -- Update color based on distance
-                            local colorIntensity = math.clamp(
-                                1 - (distance / DETECTION_RANGE),
-                                0.3,
-                                1
-                            )
-                            trackedRocks[rock].DistanceLabel.TextColor3 =
-                                Color3.fromRGB(
-                                    255,
-                                    255 * (1 - colorIntensity),
-                                    255 * (1 - colorIntensity)
-                                )
-                        end
-                    else
-                        -- Out of range - just remove from tracking
-                        if trackedRocks[rock] then
-                            trackedRocks[rock] = nil
-                            print('SirenRock went out of range')
-                        end
-                    end
-                end
-            end
-
-            -- Clean up tracking table for rocks that no longer exist
-            for rock, _ in pairs(trackedRocks) do
-                if not rock.Parent then
-                    trackedRocks[rock] = nil
-                end
-            end
-        end
-
-        task.wait(UPDATE_RATE)
-    end
-end
-
--- Distance update loop (runs more frequently)
-local function distanceUpdateLoop()
-    while true do
-        local character = LocalPlayer.Character
-        if character and character:FindFirstChild('HumanoidRootPart') then
-            local playerPos = character.HumanoidRootPart.Position
-
-            for rock, indicator in pairs(trackedRocks) do
-                if
-                    rock
-                    and rock.Parent
-                    and indicator.Gui
-                    and indicator.Gui.Parent
-                then
-                    local rockPos = getSirenRockPosition(rock)
-                    if rockPos then
-                        local distance = (playerPos - rockPos).Magnitude
-                        indicator.DistanceLabel.Text = math.floor(distance)
-                            .. ' studs'
-
-                        -- Update color based on distance
-                        local colorIntensity =
-                            math.clamp(1 - (distance / DETECTION_RANGE), 0.3, 1)
-                        indicator.DistanceLabel.TextColor3 = Color3.fromRGB(
-                            255,
-                            255 * (1 - colorIntensity),
-                            255 * (1 - colorIntensity)
-                        )
-                    end
-                end
-            end
-        end
-
-        task.wait(DISTANCE_UPDATE_RATE)
-    end
-end
-
--- Start continuous detection
-spawn(scanningLoop)
-spawn(distanceUpdateLoop)
-
--- Notification
-game.StarterGui:SetCore('SendNotification', {
-    Title = 'SirenRock Detection Active',
-    Text = 'Continuously monitoring for SirenRocks',
-    Duration = 3,
-})
-
-print(
-    'SirenRock continuous detection started - Range: '
-        .. DETECTION_RANGE
-        .. ' studs'
-)
-
--- NoFog & Fullbright Script
--- Automatically enables nofog and fullbright with status checking and auto-correction
-
-local Lighting = game:GetService('Lighting')
-local RunService = game:GetService('RunService')
-
--- Configuration
-local NOFOG_DISTANCE = 100000
-local FULLBRIGHT_SETTINGS = {
-    Brightness = 1,
-    ClockTime = 12,
-    FogEnd = 786543,
-    GlobalShadows = false,
-    Ambient = Color3.fromRGB(178, 178, 178),
-}
-
--- Global state variables
-_G.NoFogFullbrightEnabled = true
-_G.NoFogFullbrightConnection = nil
-
--- Function to apply NoFog
-local function applyNoFog()
-    Lighting.FogEnd = NOFOG_DISTANCE
-
-    -- Remove any Atmosphere objects
-    for _, v in pairs(Lighting:GetDescendants()) do
-        if v:IsA('Atmosphere') then
-            v:Destroy()
-        end
-    end
-end
-
--- Function to apply Fullbright
-local function applyFullbright()
-    for property, value in pairs(FULLBRIGHT_SETTINGS) do
-        if Lighting[property] ~= value then
-            Lighting[property] = value
-        end
-    end
-end
-
--- Function to check and maintain settings
-local function checkAndMaintain()
-    if not _G.NoFogFullbrightEnabled then
-        return
-    end
-
-    -- Check NoFog
-    if Lighting.FogEnd < NOFOG_DISTANCE then
-        print('[NoFog] Fog distance reset detected, reapplying...')
-        applyNoFog()
-    end
-
-    -- Check Fullbright settings
-    for property, expectedValue in pairs(FULLBRIGHT_SETTINGS) do
-        local currentValue = Lighting[property]
-        local needsUpdate = false
-
-        if property == 'Ambient' then
-            -- Special handling for Color3 comparison
-            if
-                currentValue.R ~= expectedValue.R
-                or currentValue.G ~= expectedValue.G
-                or currentValue.B ~= expectedValue.B
-            then
-                needsUpdate = true
-            end
-        else
-            if currentValue ~= expectedValue then
-                needsUpdate = true
-            end
-        end
-
-        if needsUpdate then
-            print(
-                string.format(
-                    '[Fullbright] %s changed from expected value, reapplying...',
-                    property
-                )
-            )
-            Lighting[property] = expectedValue
-        end
-    end
-end
-
--- Function to start the script
-local function startNoFogFullbright()
-    if _G.NoFogFullbrightConnection then
-        _G.NoFogFullbrightConnection:Disconnect()
-    end
-
-    print('[NoFog & Fullbright] Enabling...')
-
-    -- Initial application
-    applyNoFog()
-    applyFullbright()
-
-    -- Set up monitoring connection
-    _G.NoFogFullbrightEnabled = true
-    _G.NoFogFullbrightConnection =
-        RunService.Heartbeat:Connect(checkAndMaintain)
-
-    print('[NoFog & Fullbright] Enabled! Monitoring for changes...')
-    print('- NoFog: Active (Fog distance set to ' .. NOFOG_DISTANCE .. ')')
-    print('- Fullbright: Active')
-    print('- Auto-correction: Enabled')
-end
-
--- Function to stop the script
-local function stopNoFogFullbright()
-    _G.NoFogFullbrightEnabled = false
-    if _G.NoFogFullbrightConnection then
-        _G.NoFogFullbrightConnection:Disconnect()
-        _G.NoFogFullbrightConnection = nil
-    end
-    print('[NoFog & Fullbright] Disabled')
-end
-
--- Function to check current status
-local function getStatus()
-    local status = {
-        enabled = _G.NoFogFullbrightEnabled or false,
-        nofog_active = Lighting.FogEnd >= NOFOG_DISTANCE,
-        fullbright_settings = {},
-    }
-
-    for property, expectedValue in pairs(FULLBRIGHT_SETTINGS) do
-        local currentValue = Lighting[property]
-        if property == 'Ambient' then
-            status.fullbright_settings[property] = {
-                current = string.format(
-                    'RGB(%.0f,%.0f,%.0f)',
-                    currentValue.R * 255,
-                    currentValue.G * 255,
-                    currentValue.B * 255
-                ),
-                expected = string.format(
-                    'RGB(%.0f,%.0f,%.0f)',
-                    expectedValue.R * 255,
-                    expectedValue.G * 255,
-                    expectedValue.B * 255
-                ),
-                correct = (
-                    currentValue.R == expectedValue.R
-                    and currentValue.G == expectedValue.G
-                    and currentValue.B == expectedValue.B
-                ),
-            }
-        else
-            status.fullbright_settings[property] = {
-                current = tostring(currentValue),
-                expected = tostring(expectedValue),
-                correct = (currentValue == expectedValue),
-            }
-        end
-    end
-
-    return status
-end
-
--- Function to print status
-local function printStatus()
-    local status = getStatus()
-
-    print('=== NoFog & Fullbright Status ===')
-    print('Script Enabled:', status.enabled)
-    print(
-        'NoFog Active:',
-        status.nofog_active,
-        '(FogEnd:',
-        Lighting.FogEnd .. ')'
-    )
-    print('Fullbright Settings:')
-
-    for property, info in pairs(status.fullbright_settings) do
-        local statusIcon = info.correct and '✓' or '✗'
-        print(
-            string.format(
-                '  %s %s: %s (Expected: %s)',
-                statusIcon,
-                property,
-                info.current,
-                info.expected
-            )
-        )
-    end
-    print('===============================')
-end
-
--- Auto-start the script
-startNoFogFullbright()
-
--- Expose control functions globally for manual control
-_G.StartNoFogFullbright = startNoFogFullbright
-_G.StopNoFogFullbright = stopNoFogFullbright
-_G.NoFogFullbrightStatus = printStatus
-
--- Print initial status after a brief delay to let everything settle
-task.wait(1)
-printStatus()
-
-print('\nManual Controls:')
-print('- _G.StartNoFogFullbright() -- Start/restart the script')
-print('- _G.StopNoFogFullbright() -- Stop the script')
-print('- _G.NoFogFullbrightStatus() -- Check current status')
-
--- Vehicle Fly Script (Nameless Admin vfly only)
--- Toggle with N key
--- Auto restart when entering/exiting vehicles
-
-local cmdlp = game.Players.LocalPlayer
-local cmdm = cmdlp:GetMouse()
-local workspace = game.workspace
-local RunService = game:GetService('RunService')
-local UserInputService = game:GetService('UserInputService')
-
--- Initialize fly variables
-local FLYING = false
-local speedofthevfly = 10
-local CONTROL = { F = 0, B = 0, L = 0, R = 0, Q = 0, E = 0 }
-local lCONTROL = { F = 0, B = 0, L = 0, R = 0, Q = 0, E = 0 }
-local SPEED = 0
-local BG, BV
-local FlyGUI = nil
-local seatConnection = nil
-local wasInSeat = false
-
--- Create GUI
-local function createGUI()
-    if FlyGUI then
-        FlyGUI:Destroy()
-    end
-
-    local ScreenGui = Instance.new('ScreenGui')
-    ScreenGui.Name = 'VFlySpeedGUI'
-    ScreenGui.ResetOnSpawn = false
-    ScreenGui.Parent = game:GetService('CoreGui')
-    FlyGUI = ScreenGui
-
-    -- Main Frame
-    local Frame = Instance.new('Frame')
-    Frame.Size = UDim2.new(0, 300, 0, 120)
-    Frame.Position = UDim2.new(0.5, -150, 0, 10)
-    Frame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-    Frame.BorderSizePixel = 0
-    Frame.Active = true
-    Frame.Draggable = true
-    Frame.Parent = ScreenGui
-
-    -- Add rounded corners
-    local UICorner = Instance.new('UICorner')
-    UICorner.CornerRadius = UDim.new(0, 12)
-    UICorner.Parent = Frame
-
-    -- Title Label
-    local TitleLabel = Instance.new('TextLabel')
-    TitleLabel.Size = UDim2.new(1, 0, 0, 30)
-    TitleLabel.Position = UDim2.new(0, 0, 0, 0)
-    TitleLabel.BackgroundTransparency = 1
-    TitleLabel.Text = 'Vehicle Fly Control'
-    TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    TitleLabel.TextScaled = true
-    TitleLabel.Font = Enum.Font.SourceSansBold
-    TitleLabel.Parent = Frame
-
-    -- Status Label
-    local StatusLabel = Instance.new('TextLabel')
-    StatusLabel.Name = 'StatusLabel'
-    StatusLabel.Size = UDim2.new(1, -20, 0, 20)
-    StatusLabel.Position = UDim2.new(0, 10, 0, 30)
-    StatusLabel.BackgroundTransparency = 1
-    StatusLabel.Text = 'Vehicle Fly: OFF | Press N to toggle'
-    StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-    StatusLabel.TextScaled = true
-    StatusLabel.Font = Enum.Font.SourceSans
-    StatusLabel.Parent = Frame
-
-    -- Speed Label
-    local SpeedLabel = Instance.new('TextLabel')
-    SpeedLabel.Name = 'SpeedLabel'
-    SpeedLabel.Size = UDim2.new(0, 60, 0, 20)
-    SpeedLabel.Position = UDim2.new(0, 10, 0, 55)
-    SpeedLabel.BackgroundTransparency = 1
-    SpeedLabel.Text = 'Speed: ' .. tostring(speedofthevfly)
-    SpeedLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    SpeedLabel.TextScaled = true
-    SpeedLabel.Font = Enum.Font.SourceSans
-    SpeedLabel.Parent = Frame
-
-    -- Speed Slider
-    local SliderFrame = Instance.new('Frame')
-    SliderFrame.Size = UDim2.new(0, 200, 0, 20)
-    SliderFrame.Position = UDim2.new(0, 75, 0, 55)
-    SliderFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-    SliderFrame.BorderSizePixel = 0
-    SliderFrame.Parent = Frame
-
-    local SliderCorner = Instance.new('UICorner')
-    SliderCorner.CornerRadius = UDim.new(0, 10)
-    SliderCorner.Parent = SliderFrame
-
-    local SliderFill = Instance.new('Frame')
-    SliderFill.Name = 'SliderFill'
-    SliderFill.Size = UDim2.new(speedofthevfly / 50, 0, 1, 0)
-    SliderFill.Position = UDim2.new(0, 0, 0, 0)
-    SliderFill.BackgroundColor3 = Color3.fromRGB(100, 200, 255)
-    SliderFill.BorderSizePixel = 0
-    SliderFill.Parent = SliderFrame
-
-    local FillCorner = Instance.new('UICorner')
-    FillCorner.CornerRadius = UDim.new(0, 10)
-    FillCorner.Parent = SliderFill
-
-    local SliderButton = Instance.new('TextButton')
-    SliderButton.Name = 'SliderButton'
-    SliderButton.Size = UDim2.new(0, 20, 0, 20)
-    SliderButton.Position = UDim2.new(speedofthevfly / 50, -10, 0, 0)
-    SliderButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    SliderButton.Text = ''
-    SliderButton.BorderSizePixel = 0
-    SliderButton.Parent = SliderFrame
-
-    local ButtonCorner = Instance.new('UICorner')
-    ButtonCorner.CornerRadius = UDim.new(0, 10)
-    ButtonCorner.Parent = SliderButton
-
-    -- Instructions Label
-    local InstructionsLabel = Instance.new('TextLabel')
-    InstructionsLabel.Size = UDim2.new(1, -20, 0, 20)
-    InstructionsLabel.Position = UDim2.new(0, 10, 0, 85)
-    InstructionsLabel.BackgroundTransparency = 1
-    InstructionsLabel.Text = 'W/A/S/D to move | Y = Up | T = Down | U = Toggle'
-    InstructionsLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-    InstructionsLabel.TextScaled = true
-    InstructionsLabel.Font = Enum.Font.SourceSans
-    InstructionsLabel.Parent = Frame
-
-    -- Slider functionality
-    local dragging = false
-
-    local function updateSpeed(percentage)
-        speedofthevfly = math.floor(percentage * 49) + 1 -- 1 to 50
-        SpeedLabel.Text = 'Speed: ' .. tostring(speedofthevfly)
-        SliderFill.Size = UDim2.new(percentage, 0, 1, 0)
-        SliderButton.Position = UDim2.new(percentage, -10, 0, 0)
-    end
-
-    SliderButton.MouseButton1Down:Connect(function()
-        dragging = true
-    end)
-
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = false
-        end
-    end)
-
-    local sliderConnection
-    sliderConnection = RunService.RenderStepped:Connect(function()
-        if not FlyGUI or not FlyGUI.Parent then
-            sliderConnection:Disconnect()
-            return
-        end
-
-        if dragging then
-            local mouse = UserInputService:GetMouseLocation()
-            local sliderPos = SliderFrame.AbsolutePosition.X
-            local sliderSize = SliderFrame.AbsoluteSize.X
-            local percentage =
-                math.clamp((mouse.X - sliderPos) / sliderSize, 0, 1)
-            updateSpeed(percentage)
-        end
-    end)
-
-    return ScreenGui
-end
-
--- Update GUI status
-local function updateGUIStatus(status)
-    if FlyGUI and FlyGUI.Parent then
-        local statusLabel = FlyGUI:FindFirstChild('Frame')
-            :FindFirstChild('StatusLabel')
-        if statusLabel then
-            if status then
-                statusLabel.Text = 'Vehicle Fly: ON | Press U to toggle'
-                statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-            else
-                statusLabel.Text = 'Vehicle Fly: OFF | Press U to toggle'
-                statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-            end
-        end
-    end
-end
-
--- Exact sFLY function from Nameless Admin (vfly mode only)
-function sFLY(vfly)
-    FLYING = false
-    speedofthevfly = speedofthevfly or 10
-
-    while
-        not cmdlp
-        or not cmdlp.Character
-        or not cmdlp.Character:FindFirstChild('HumanoidRootPart')
-        or not cmdlp.Character:FindFirstChild('Humanoid')
-        or not cmdm
-    do
-        wait()
-    end
-
-    local T = cmdlp.Character.HumanoidRootPart
-
-    local function FLY()
-        FLYING = true
-        BG = Instance.new('BodyGyro', T)
-        BV = Instance.new('BodyVelocity', T)
-        BG.P = 9e4
-        BG.maxTorque = Vector3.new(9e9, 9e9, 9e9)
-        BG.cframe = T.CFrame
-        BV.velocity = Vector3.new(0, 0, 0)
-        BV.maxForce = Vector3.new(9e9, 9e9, 9e9)
-
-        spawn(function()
-            while FLYING do
-                -- vfly mode - no PlatformStand
-
-                if
-                    CONTROL.L + CONTROL.R ~= 0
-                    or CONTROL.F + CONTROL.B ~= 0
-                    or CONTROL.Q + CONTROL.E ~= 0
-                then
-                    SPEED = 50
-                elseif
-                    not (
-                        CONTROL.L + CONTROL.R ~= 0
-                        or CONTROL.F + CONTROL.B ~= 0
-                        or CONTROL.Q + CONTROL.E ~= 0
-                    ) and SPEED ~= 0
-                then
-                    SPEED = 0
-                end
-
-                if
-                    (CONTROL.L + CONTROL.R) ~= 0
-                    or (CONTROL.F + CONTROL.B) ~= 0
-                    or (CONTROL.Q + CONTROL.E) ~= 0
-                then
-                    BV.velocity = (
-                        (
-                            workspace.CurrentCamera.CoordinateFrame.lookVector
-                            * (CONTROL.F + CONTROL.B)
-                        )
-                        + (
-                            (
-                                workspace.CurrentCamera.CoordinateFrame
-                                * CFrame.new(
-                                    CONTROL.L + CONTROL.R,
-                                    (
-                                        CONTROL.F
-                                        + CONTROL.B
-                                        + CONTROL.Q
-                                        + CONTROL.E
-                                    )
-                                        * 0.2,
-                                    0
-                                ).p
-                            )
-                            - workspace.CurrentCamera.CoordinateFrame.p
-                        )
-                    ) * SPEED
-                    lCONTROL = {
-                        F = CONTROL.F,
-                        B = CONTROL.B,
-                        L = CONTROL.L,
-                        R = CONTROL.R,
-                    }
-                elseif
-                    (CONTROL.L + CONTROL.R) == 0
-                    and (CONTROL.F + CONTROL.B) == 0
-                    and (CONTROL.Q + CONTROL.E) == 0
-                    and SPEED ~= 0
-                then
-                    BV.velocity = (
-                        (
-                            workspace.CurrentCamera.CoordinateFrame.lookVector
-                            * (lCONTROL.F + lCONTROL.B)
-                        )
-                        + (
-                            (
-                                workspace.CurrentCamera.CoordinateFrame
-                                * CFrame.new(
-                                    lCONTROL.L + lCONTROL.R,
-                                    (
-                                        lCONTROL.F
-                                        + lCONTROL.B
-                                        + CONTROL.Q
-                                        + CONTROL.E
-                                    )
-                                        * 0.2,
-                                    0
-                                ).p
-                            )
-                            - workspace.CurrentCamera.CoordinateFrame.p
-                        )
-                    ) * SPEED
-                else
-                    BV.velocity = Vector3.new(0, 0, 0)
-                end
-
-                BG.cframe = workspace.CurrentCamera.CoordinateFrame
-                wait()
-            end
-
-            CONTROL = { F = 0, B = 0, L = 0, R = 0, Q = 0, E = 0 }
-            lCONTROL = { F = 0, B = 0, L = 0, R = 0, Q = 0, E = 0 }
-            SPEED = 0
-            if BG then
-                BG:destroy()
-            end
-            if BV then
-                BV:destroy()
-            end
-            cmdlp.Character.Humanoid.PlatformStand = false
-        end)
-    end
-
-    FLY()
-end
-
--- Stop flying function
-local function stopFlying()
-    FLYING = false
-    updateGUIStatus(false)
-end
-
--- Start flying function
-local function startFlying()
-    sFLY(true)
-    updateGUIStatus(true)
-end
-
--- Keyboard controls for movement
-cmdm.KeyDown:connect(function(KEY)
-    if KEY:lower() == 'w' then
-        CONTROL.F = speedofthevfly
-    elseif KEY:lower() == 's' then
-        CONTROL.B = -speedofthevfly
-    elseif KEY:lower() == 'a' then
-        CONTROL.L = -speedofthevfly
-    elseif KEY:lower() == 'd' then
-        CONTROL.R = speedofthevfly
-    elseif KEY:lower() == 'y' then
-        CONTROL.Q = speedofthevfly * 2
-    elseif KEY:lower() == 't' then
-        CONTROL.E = -speedofthevfly * 2
-    end
-end)
-
-cmdm.KeyUp:connect(function(KEY)
-    if KEY:lower() == 'w' then
-        CONTROL.F = 0
-    elseif KEY:lower() == 's' then
-        CONTROL.B = 0
-    elseif KEY:lower() == 'a' then
-        CONTROL.L = 0
-    elseif KEY:lower() == 'd' then
-        CONTROL.R = 0
-    elseif KEY:lower() == 'y' then
-        CONTROL.Q = 0
-    elseif KEY:lower() == 't' then
-        CONTROL.E = 0
-    end
-end)
-
--- Toggle with U key
+-- Keybind to toggle GUI (RightBracket ']')
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then
         return
     end
-
-    if input.KeyCode == Enum.KeyCode.U then
-        if FLYING then
-            stopFlying()
-            game.StarterGui:SetCore('SendNotification', {
-                Title = 'Vehicle Fly Disabled',
-                Text = 'Press U to enable',
-                Duration = 2,
-            })
+    if input.KeyCode == Enum.KeyCode.RightBracket then
+        if mainFrame.Visible then
+            mainFrame.Visible = false
         else
-            startFlying()
-            game.StarterGui:SetCore('SendNotification', {
-                Title = 'Vehicle Fly Enabled',
-                Text = 'Press U to disable',
-                Duration = 2,
-            })
+            mainFrame.Visible = true
+            createNotification(
+                'Hub Reopened',
+                'Arcane Hub is back online!',
+                '⚡',
+                Color3.fromRGB(138, 43, 226)
+            )
         end
     end
 end)
 
--- Monitor seat changes
-local function setupSeatMonitoring()
-    if seatConnection then
-        seatConnection:Disconnect()
-    end
-
-    seatConnection = RunService.Heartbeat:Connect(function()
-        if cmdlp.Character and cmdlp.Character:FindFirstChild('Humanoid') then
-            local humanoid = cmdlp.Character.Humanoid
-            local isInSeat = humanoid.SeatPart ~= nil
-
-            -- If seat status changed while flying
-            if FLYING and isInSeat ~= wasInSeat then
-                -- Stop flying
-                stopFlying()
-                wait(0.1)
-                -- Restart flying
-                startFlying()
-
-                game.StarterGui:SetCore('SendNotification', {
-                    Title = 'Vehicle Fly Restarted',
-                    Text = isInSeat and 'Entered vehicle - fly restarted'
-                        or 'Exited vehicle - fly restarted',
-                    Duration = 2,
-                })
-            end
-
-            wasInSeat = isInSeat
-        end
-    end)
-end
-
--- Initialize
-createGUI()
-setupSeatMonitoring()
-
 -- Initial notification
-game.StarterGui:SetCore('SendNotification', {
-    Title = 'Vehicle Fly Script Loaded',
-    Text = 'Press U to toggle fly\nAuto-restarts when entering/exiting vehicles',
-    Duration = 5,
-})
+createNotification(
+    'Arcane Hub Loaded',
+    'Successfully loaded ' .. #SCRIPTS .. ' scripts!',
+    '⚡',
+    Color3.fromRGB(138, 43, 226)
+)
 
--- Noclip GUI Toggle Script
--- Creates a draggable GUI with toggle button for noclip functionality
-
-local Players = game:GetService('Players')
-local RunService = game:GetService('RunService')
-local UserInputService = game:GetService('UserInputService')
-local TweenService = game:GetService('TweenService')
-
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild('PlayerGui')
-
--- State variables
-local noclipEnabled = false
-local noclipConnection = nil
-local character = nil
-local humanoid = nil
-
--- GUI Configuration
-local GUI_SIZE = UDim2.new(0, 200, 0, 80)
-local GUI_POSITION = UDim2.new(0, 10, 0, 10)
-
--- Function to get current character
-local function updateCharacter()
-    character = player.Character
-    if character then
-        humanoid = character:WaitForChild('Humanoid')
+-- Pulsing logo animation
+task.spawn(function()
+    while screenGui.Parent do
+        local pulse = TweenService:Create(
+            logo,
+            TweenInfo.new(
+                2,
+                Enum.EasingStyle.Sine,
+                Enum.EasingDirection.InOut,
+                -1,
+                true
+            ),
+            { TextTransparency = 0.3 }
+        )
+        pulse:Play()
+        task.wait(4)
     end
-end
-
--- Function to enable noclip
-local function enableNoclip()
-    if noclipConnection then
-        return
-    end -- Already enabled
-
-    noclipConnection = RunService.Stepped:Connect(function()
-        if not character then
-            updateCharacter()
-            return
-        end
-
-        for _, v in pairs(character:GetDescendants()) do
-            if v:IsA('BasePart') then
-                v.CanCollide = false
-            end
-        end
-    end)
-
-    noclipEnabled = true
-    print('[Noclip] Enabled')
-end
-
--- Function to disable noclip
-local function disableNoclip()
-    if noclipConnection then
-        noclipConnection:Disconnect()
-        noclipConnection = nil
-    end
-
-    -- Re-enable collisions
-    if character then
-        for _, v in pairs(character:GetDescendants()) do
-            if v:IsA('BasePart') and v.Name ~= 'HumanoidRootPart' then
-                v.CanCollide = true
-            end
-        end
-    end
-
-    noclipEnabled = false
-    print('[Noclip] Disabled')
-end
-
--- Function to toggle noclip
-local function toggleNoclip()
-    if noclipEnabled then
-        disableNoclip()
-    else
-        enableNoclip()
-    end
-end
-
--- Create the GUI
-local function createGUI()
-    -- Remove existing GUI if it exists
-    local existingGui = playerGui:FindFirstChild('NoclipGUI')
-    if existingGui then
-        existingGui:Destroy()
-    end
-
-    -- Main GUI
-    local screenGui = Instance.new('ScreenGui')
-    screenGui.Name = 'NoclipGUI'
-    screenGui.ResetOnSpawn = false
-    screenGui.Parent = playerGui
-
-    -- Main Frame
-    local mainFrame = Instance.new('Frame')
-    mainFrame.Name = 'MainFrame'
-    mainFrame.Size = GUI_SIZE
-    mainFrame.Position = GUI_POSITION
-    mainFrame.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-    mainFrame.BorderSizePixel = 0
-    mainFrame.Active = true
-    mainFrame.Draggable = true
-    mainFrame.Parent = screenGui
-
-    -- Add rounded corners
-    local corner = Instance.new('UICorner')
-    corner.CornerRadius = UDim.new(0, 8)
-    corner.Parent = mainFrame
-
-    -- Add subtle shadow/border effect
-    local stroke = Instance.new('UIStroke')
-    stroke.Color = Color3.fromRGB(70, 70, 70)
-    stroke.Thickness = 1
-    stroke.Parent = mainFrame
-
-    -- Title Label
-    local titleLabel = Instance.new('TextLabel')
-    titleLabel.Name = 'TitleLabel'
-    titleLabel.Size = UDim2.new(1, 0, 0, 25)
-    titleLabel.Position = UDim2.new(0, 0, 0, 5)
-    titleLabel.BackgroundTransparency = 1
-    titleLabel.Text = 'NOCLIP CONTROL'
-    titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    titleLabel.TextScaled = true
-    titleLabel.Font = Enum.Font.GothamBold
-    titleLabel.Parent = mainFrame
-
-    -- Toggle Button
-    local toggleButton = Instance.new('TextButton')
-    toggleButton.Name = 'ToggleButton'
-    toggleButton.Size = UDim2.new(0.8, 0, 0, 35)
-    toggleButton.Position = UDim2.new(0.1, 0, 0, 40)
-    toggleButton.BackgroundColor3 = Color3.fromRGB(220, 50, 47) -- Red for OFF
-    toggleButton.BorderSizePixel = 0
-    toggleButton.Text = 'OFF'
-    toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    toggleButton.TextScaled = true
-    toggleButton.Font = Enum.Font.GothamBold
-    toggleButton.Parent = mainFrame
-
-    -- Button corner
-    local buttonCorner = Instance.new('UICorner')
-    buttonCorner.CornerRadius = UDim.new(0, 6)
-    buttonCorner.Parent = toggleButton
-
-    -- Status Indicator (small dot)
-    local statusDot = Instance.new('Frame')
-    statusDot.Name = 'StatusDot'
-    statusDot.Size = UDim2.new(0, 8, 0, 8)
-    statusDot.Position = UDim2.new(1, -15, 0, 8)
-    statusDot.BackgroundColor3 = Color3.fromRGB(220, 50, 47) -- Red for OFF
-    statusDot.BorderSizePixel = 0
-    statusDot.Parent = mainFrame
-
-    local dotCorner = Instance.new('UICorner')
-    dotCorner.CornerRadius = UDim.new(0.5, 0)
-    dotCorner.Parent = statusDot
-
-    -- Function to update button appearance
-    local function updateButtonAppearance()
-        local tweenInfo =
-            TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-
-        if noclipEnabled then
-            -- ON state - Green
-            local buttonTween = TweenService:Create(toggleButton, tweenInfo, {
-                BackgroundColor3 = Color3.fromRGB(46, 204, 113),
-            })
-            local dotTween = TweenService:Create(statusDot, tweenInfo, {
-                BackgroundColor3 = Color3.fromRGB(46, 204, 113),
-            })
-
-            buttonTween:Play()
-            dotTween:Play()
-            toggleButton.Text = 'ON'
-        else
-            -- OFF state - Red
-            local buttonTween = TweenService:Create(toggleButton, tweenInfo, {
-                BackgroundColor3 = Color3.fromRGB(220, 50, 47),
-            })
-            local dotTween = TweenService:Create(statusDot, tweenInfo, {
-                BackgroundColor3 = Color3.fromRGB(220, 50, 47),
-            })
-
-            buttonTween:Play()
-            dotTween:Play()
-            toggleButton.Text = 'OFF'
-        end
-    end
-
-    -- Button hover effects
-    toggleButton.MouseEnter:Connect(function()
-        local hoverTween =
-            TweenService:Create(toggleButton, TweenInfo.new(0.2), {
-                Size = UDim2.new(0.85, 0, 0, 37),
-            })
-        hoverTween:Play()
-    end)
-
-    toggleButton.MouseLeave:Connect(function()
-        local hoverTween =
-            TweenService:Create(toggleButton, TweenInfo.new(0.2), {
-                Size = UDim2.new(0.8, 0, 0, 35),
-            })
-        hoverTween:Play()
-    end)
-
-    -- Button click functionality
-    toggleButton.MouseButton1Click:Connect(function()
-        toggleNoclip()
-        updateButtonAppearance()
-    end)
-
-    -- Keyboard toggle (Comma key)
-    UserInputService.InputBegan:Connect(function(input, gameProcessed)
-        if gameProcessed then
-            return
-        end
-
-        if input.KeyCode == Enum.KeyCode.Comma then
-            toggleNoclip()
-            updateButtonAppearance()
-        end
-    end)
-
-    -- Initial button state
-    updateButtonAppearance()
-
-    print('[Noclip GUI] Created successfully!')
-    print('- Click the button to toggle noclip')
-    print("- Press ',' (comma) key to toggle")
-    print('- Drag the GUI to move it around')
-
-    return screenGui
-end
-
--- Handle character respawning
-local function onCharacterAdded(newCharacter)
-    character = newCharacter
-    humanoid = character:WaitForChild('Humanoid')
-
-    -- If noclip was enabled before respawn, re-enable it
-    if noclipEnabled then
-        task.wait(0.5) -- Wait for character to fully load
-        enableNoclip()
-    end
-end
-
--- Connect character events
-player.CharacterAdded:Connect(onCharacterAdded)
-if player.Character then
-    onCharacterAdded(player.Character)
-end
-
--- Create the GUI
-local gui = createGUI()
-
--- Global functions for external control
-_G.ToggleNoclip = toggleNoclip
-_G.EnableNoclip = enableNoclip
-_G.DisableNoclip = disableNoclip
-_G.NoclipStatus = function()
-    print('Noclip Status:', noclipEnabled and 'ENABLED' or 'DISABLED')
-    return noclipEnabled
-end
-
--- Cleanup function
-_G.DestroyNoclipGUI = function()
-    if gui then
-        gui:Destroy()
-    end
-    disableNoclip()
-    print('[Noclip GUI] Destroyed')
-end
+end)
