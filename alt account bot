@@ -832,7 +832,7 @@ do
     end)
 end
 
--- Complete Alt Follow Script v5.3.1 - Smooth Vertical + Stamina Fixes
+-- Complete Alt Follow Script v5.3.2 - Curve Acceleration
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -956,7 +956,7 @@ local CONFIG = {
     
     -- Stuck Detection
     STUCK_VELOCITY_THRESHOLD = 3,
-    STUCK_TIME_THRESHOLD = 0.35,
+    STUCK_TIME_THRESHOLD = 0.8,
     UNSTUCK_DURATION = 3,
     UNSTUCK_SCAN_DISTANCE = 100,
     UNSTUCK_SPHERE_POINTS = 100,
@@ -986,6 +986,11 @@ local CONFIG = {
     JUMP_CHANCE = 0.3,             -- 30% chance to jump each interval
     JUMP_INTERVAL = 0.8,           -- Check for jump every 0.8 seconds
     COMBAT_JUMP_CHANCE = 0.4,      -- 40% chance during combat (throw off aim)
+    
+    -- Curve acceleration (flight boost)
+    CURVE_THRESHOLD = 0.15,        -- Min cross product to trigger curve strafe
+    CURVE_DEVIATION_RATIO = 0.25,  -- Max deviation = distance * this ratio (25%)
+    CURVE_MIN_VELOCITY = 5,        -- Min velocity magnitude to calculate curve
 }
 
 -- =====================================================
@@ -1500,6 +1505,139 @@ local function tryCombatJump()
     end
     
     return false
+end
+
+-- =====================================================
+-- CURVE ACCELERATION (Flight Speed Boost)
+-- =====================================================
+-- Instead of just pressing W, strafe into the curve to accelerate faster
+-- Target RIGHT of velocity → W + D (curve right)
+-- Target LEFT of velocity → W + A (curve left)
+
+local function getCurveDirection(myPos, targetPos, velocity)
+    -- Need minimum velocity to calculate curve
+    if velocity.Magnitude < CONFIG.CURVE_MIN_VELOCITY then
+        return "STRAIGHT", 0
+    end
+    
+    -- Get direction to target (horizontal)
+    local toTarget = targetPos - myPos
+    toTarget = Vector3.new(toTarget.X, 0, toTarget.Z)
+    
+    if toTarget.Magnitude < 1 then
+        return "STRAIGHT", 0
+    end
+    
+    -- Get velocity direction (horizontal)
+    local velDir = Vector3.new(velocity.X, 0, velocity.Z)
+    if velDir.Magnitude < 1 then
+        return "STRAIGHT", 0
+    end
+    
+    -- Cross product: velocity × toTarget
+    -- Positive Y = target is to the RIGHT of velocity
+    -- Negative Y = target is to the LEFT of velocity
+    local cross = velDir.Unit:Cross(toTarget.Unit)
+    
+    if cross.Y > CONFIG.CURVE_THRESHOLD then
+        return "RIGHT", cross.Y  -- Target right of velocity → curve right → W + D
+    elseif cross.Y < -CONFIG.CURVE_THRESHOLD then
+        return "LEFT", cross.Y   -- Target left of velocity → curve left → W + A
+    else
+        return "STRAIGHT", cross.Y
+    end
+end
+
+-- Calculate deviation from straight line path to target
+local function getPathDeviation(myPos, targetPos, velocity)
+    local toTarget = targetPos - myPos
+    local distance = toTarget.Magnitude
+    
+    if distance < 10 then
+        return 0, 0  -- Too close, no deviation calc needed
+    end
+    
+    -- Project velocity onto toTarget to get "on-path" component
+    local toTargetUnit = toTarget.Unit
+    local velOnPath = velocity:Dot(toTargetUnit)
+    
+    -- Get perpendicular component (deviation)
+    local velPerp = velocity - (toTargetUnit * velOnPath)
+    local deviation = velPerp.Magnitude
+    
+    -- Max allowed deviation scales with distance
+    local maxDeviation = distance * CONFIG.CURVE_DEVIATION_RATIO
+    
+    return deviation, maxDeviation
+end
+
+-- Pulse W + appropriate strafe for curve acceleration
+-- Returns true if curve boost was applied, false if just W
+local function pulseCurveAcceleration(myPos, targetPos)
+    local myRoot = getRoot(player)
+    if not myRoot then
+        pulseMovementKey(Enum.KeyCode.W)
+        return false
+    end
+    
+    local velocity = myRoot.Velocity
+    local curveDir, crossY = getCurveDirection(myPos, targetPos, velocity)
+    local deviation, maxDeviation = getPathDeviation(myPos, targetPos, velocity)
+    
+    -- Always press W
+    pulseMovementKey(Enum.KeyCode.W)
+    
+    -- Check if we're deviating too much
+    if deviation > maxDeviation and maxDeviation > 0 then
+        -- Drifting too far - strafe OPPOSITE to correct
+        if crossY > 0 then
+            -- We were curving right, now strafe left to correct
+            pulseMovementKey(Enum.KeyCode.A)
+            return true, "CORRECT_LEFT"
+        elseif crossY < 0 then
+            -- We were curving left, now strafe right to correct
+            pulseMovementKey(Enum.KeyCode.D)
+            return true, "CORRECT_RIGHT"
+        end
+    end
+    
+    -- Normal curve boost
+    if curveDir == "RIGHT" then
+        pulseMovementKey(Enum.KeyCode.D)
+        return true, "CURVE_RIGHT"
+    elseif curveDir == "LEFT" then
+        pulseMovementKey(Enum.KeyCode.A)
+        return true, "CURVE_LEFT"
+    end
+    
+    return false, "STRAIGHT"
+end
+
+-- Vertical curve acceleration (for ascend/descend)
+local function getCurveDirectionVertical(myPos, targetPos, velocity)
+    -- Need minimum velocity
+    if velocity.Magnitude < CONFIG.CURVE_MIN_VELOCITY then
+        return "STRAIGHT", 0
+    end
+    
+    -- For vertical movement, check if target is above/below our velocity direction
+    -- Use XY or ZY plane depending on which has more movement
+    local toTarget = targetPos - myPos
+    
+    -- Cross product in vertical plane
+    local cross = velocity.Unit:Cross(toTarget.Unit)
+    
+    -- For vertical curves, we care about the horizontal component of cross
+    -- which tells us if we're curving up or down relative to target
+    local horizCross = math.sqrt(cross.X * cross.X + cross.Z * cross.Z)
+    
+    if cross.Y > CONFIG.CURVE_THRESHOLD then
+        return "RIGHT", cross.Y
+    elseif cross.Y < -CONFIG.CURVE_THRESHOLD then
+        return "LEFT", cross.Y
+    else
+        return "STRAIGHT", cross.Y
+    end
 end
 
 local function tryResurface()
@@ -2271,7 +2409,7 @@ local function startMovementLoop()
                 Camera.CFrame = CFrame.lookAt(myPos, targetPos)
                 if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
                     movementPulseTimer = 0
-                    pulseMovementKey(Enum.KeyCode.W)
+                    pulseCurveAcceleration(myPos, targetPos)  -- Curve boost for approach
                 end
                 movementPulseTimer = movementPulseTimer + deltaTime
                 return
@@ -2545,7 +2683,8 @@ local function startMovementLoop()
                 flightMode = pointCameraForMovement(myPos, targetPos)
                 if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
                     movementPulseTimer = 0
-                    pulseMovementKey(Enum.KeyCode.W)
+                    local curved, curveType = pulseCurveAcceleration(myPos, targetPos)
+                    if curved then flightMode = flightMode .. "+" .. curveType end
                 end
             end
             
@@ -2558,7 +2697,8 @@ local function startMovementLoop()
             
             if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
                 movementPulseTimer = 0
-                pulseMovementKey(Enum.KeyCode.W)
+                local curved, curveType = pulseCurveAcceleration(myPos, targetPos)
+                if curved then flightMode = flightMode .. "+" .. curveType end
             end
         end
         
@@ -2779,27 +2919,25 @@ end)
 -- =====================================================
 
 print("=" .. string.rep("=", 50))
-print("ALT FOLLOW SCRIPT V5.3.1 - SMOOTH VERTICAL + STAMINA")
+print("ALT FOLLOW SCRIPT V5.3.2 - CURVE ACCELERATION")
 print("=" .. string.rep("=", 50))
 print("Controls: N - Toggle following (nearest to cursor)")
 print("")
+print("CURVE ACCELERATION:")
+print("• Strafes into curves for speed boost")
+print("• Target RIGHT of velocity → W + D")
+print("• Target LEFT of velocity → W + A")
+print("• Max deviation: " .. (CONFIG.CURVE_DEVIATION_RATIO * 100) .. "% of distance")
+print("• Used in: TRAVEL, APPROACH, underwater chase")
+print("")
 print("SMOOTH VERTICAL FLIGHT:")
-print("• Ignores small height changes (<" .. CONFIG.SMALL_HEIGHT_CHANGE .. " studs)")
-print("• Max vertical separation: " .. CONFIG.MAX_VERTICAL_SEPARATION .. " studs")
+print("• Max vertical: " .. CONFIG.MAX_VERTICAL_SEPARATION .. " studs")
 print("• STEEP if horizontal < " .. CONFIG.HORIZONTAL_TOO_SMALL .. " studs")
-print("• ANGLED FLIGHT (ratio: " .. CONFIG.ANGLED_FLIGHT_RATIO .. ")")
+print("• ANGLED ratio: " .. CONFIG.ANGLED_FLIGHT_RATIO)
 print("")
-print("STAMINA REGEN MODE:")
-print("• Low stamina: backs away + jumps over obstacles")
-print("• Enough stamina: maintains range + attacks")
-print("")
-print("GROUND COMBAT JUMPING:")
-print("• Walk jump: " .. (CONFIG.JUMP_CHANCE * 100) .. "% chance every " .. CONFIG.JUMP_INTERVAL .. "s")
+print("GROUND COMBAT:")
 print("• Combat jump: " .. (CONFIG.COMBAT_JUMP_CHANCE * 100) .. "% chance (throws off aim)")
-print("")
-print("TAUNTS:")
-print("• Only if within " .. CONFIG.TAUNT_RANGE .. " studs when target died")
-print("• " .. CONFIG.TAUNT_MIN_DELAY .. "-" .. CONFIG.TAUNT_MAX_DELAY .. "s delay")
+print("• Walk jump: " .. (CONFIG.JUMP_CHANCE * 100) .. "% chance (obstacles)")
 print("")
 print("Combat: " .. CONFIG.OPTIMAL_MIN .. "-" .. CONFIG.OPTIMAL_MAX .. " studs")
 print("=" .. string.rep("=", 50))
