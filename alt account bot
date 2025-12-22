@@ -1,3 +1,100 @@
+-- Y-Bounds Auto Reset (Local) + "No character/root" watchdog
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+
+local Y_MAX = 10000
+local Y_MIN = -10000
+local CHECK_RATE = 0.2
+
+-- if character/root/humanoid stays missing for this long (after a short grace), force reset
+local SPAWN_GRACE_TIME = 1.5
+local NO_ROOT_RESET_TIME = 2.5
+local RESET_COOLDOWN = 3.0
+
+local function getRoot(char)
+	return char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+end
+
+local function getHumanoid(char)
+	return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function forceReset(char, hum)
+	-- try safest options first
+	if hum then
+		pcall(function() hum.Health = 0 end)
+		return
+	end
+	if char then
+		pcall(function() char:BreakJoints() end)
+	end
+end
+
+local function bindCharacter(char)
+	local acc = 0
+	local conn
+
+	local boundAt = tick()
+	local noRootTimer = 0
+	local lastReset = 0
+
+	conn = RunService.Heartbeat:Connect(function(dt)
+		if not char or char.Parent == nil then
+			if conn then conn:Disconnect() end
+			return
+		end
+
+		acc += dt
+		if acc < CHECK_RATE then return end
+		acc = 0
+
+		local hum = getHumanoid(char)
+		local root = getRoot(char)
+
+		-- if we're alive but missing humanoid/root for too long, reset
+		local now = tick()
+		local inGrace = (now - boundAt) < SPAWN_GRACE_TIME
+		local resetOnCooldown = (now - lastReset) < RESET_COOLDOWN
+
+		if not hum or not root then
+			if not inGrace and not resetOnCooldown then
+				noRootTimer += CHECK_RATE
+				if noRootTimer >= NO_ROOT_RESET_TIME then
+					lastReset = now
+					noRootTimer = 0
+					forceReset(char, hum)
+				end
+			end
+			return
+		else
+			noRootTimer = 0
+		end
+
+		if hum.Health <= 0 then
+			return
+		end
+
+		-- Y-bounds check
+		local y = root.Position.Y
+		if (y > Y_MAX or y < Y_MIN) and not resetOnCooldown then
+			lastReset = now
+			forceReset(char, hum)
+		end
+	end)
+end
+
+if player.Character then
+	bindCharacter(player.Character)
+end
+
+player.CharacterAdded:Connect(function(char)
+	task.wait(0.1)
+	bindCharacter(char)
+end)
+
+print("Local Y-Bounds Auto Reset loaded (with no-root watchdog).")
 
 --============================================================
 --  Advanced Player Selection  •  Remote-Based  (v1.2 25-May-2025)
@@ -927,15 +1024,15 @@ local TAUNTS = {
 local CONFIG = {
     -- Distance thresholds
     OPTIMAL_MIN = 54,
-    OPTIMAL_MAX = 73,
+    OPTIMAL_MAX = 73.3,
     OPTIMAL_MID = 60,
-    COMBAT_ZONE = 80,
+    COMBAT_ZONE = 76,
     
     -- Timing
     MOVEMENT_PULSE_RATE = 0.5,
     Q_CLICK_COOLDOWN = 1.5,
     KEY_PULSE_DURATION = 10,
-    TARGET_CHECK_RATE = 0.5,
+    TARGET_CHECK_RATE = 0.1,
     FLIGHT_TOGGLE_COOLDOWN = 1,
     
     -- Stamina Management
@@ -956,7 +1053,7 @@ local CONFIG = {
     
     -- Stuck Detection
     STUCK_VELOCITY_THRESHOLD = 3,
-    STUCK_TIME_THRESHOLD = 0.8,
+    STUCK_TIME_THRESHOLD = 0.4,
     UNSTUCK_DURATION = 3,
     UNSTUCK_SCAN_DISTANCE = 100,
     UNSTUCK_SPHERE_POINTS = 100,
@@ -989,7 +1086,7 @@ local CONFIG = {
     
     -- Curve acceleration (flight boost)
     CURVE_THRESHOLD = 0.15,        -- Min cross product to trigger curve strafe
-    CURVE_DEVIATION_RATIO = 0.25,  -- Max deviation = distance * this ratio (25%)
+    CURVE_DEVIATION_RATIO = 0.15,  -- Max deviation = distance * this ratio (25%)
     CURVE_MIN_VELOCITY = 5,        -- Min velocity magnitude to calculate curve
 }
 
