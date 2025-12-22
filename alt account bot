@@ -1,0 +1,2805 @@
+
+--============================================================
+--  Advanced Player Selection  •  Remote-Based  (v1.2 25-May-2025)
+--  • Q / R / X fire server remotes (Telekinesis / Telepathy)
+--  • Right-Alt toggles GUI (FOV, ESP, Highlight, Wall-Bang)
+--  • ESP element toggles (Name ▢  HP ▢  Studs ▢)
+--  • Per-player memory (saved to file)  +  “Toggle All” switch
+--  • Starts with EVERYONE IGNORED until you choose otherwise
+--  • NEW:  ⟶  “Target All / Ignore All” now applies to *future* joins
+--           and clears saved prefs so players who re-join follow
+--           the currently selected global mode.
+--============================================================
+
+----------------------------------------------------------------
+--  SERVICES
+----------------------------------------------------------------
+local Players            = game:GetService("Players")
+local RunService         = game:GetService("RunService")
+local UserInputService   = game:GetService("UserInputService")
+local TweenService       = game:GetService("TweenService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local CoreGui            = game:GetService("CoreGui")
+local Camera             = workspace.CurrentCamera
+local HttpService        = game:GetService("HttpService")
+
+----------------------------------------------------------------
+--  REMOTES
+----------------------------------------------------------------
+local TelekinesisEvent   = ReplicatedStorage.Remotes:WaitForChild("TelekinesisEvent")
+local TelepathyEvent     = ReplicatedStorage.Remotes:WaitForChild("TelepathyEvent")
+
+----------------------------------------------------------------
+--  PLAYER
+----------------------------------------------------------------
+local LocalPlayer        = Players.LocalPlayer
+local Mouse              = LocalPlayer:GetMouse()
+
+----------------------------------------------------------------
+--  CONFIG
+----------------------------------------------------------------
+local Config = {
+    FOVSize        = 300,
+    GUIVisible     = false,
+    ShowESP        = true,
+    ShowHighlight  = true,
+    WallBang       = true,
+    DIST_CLOSE     = 75,
+    DIST_MEDIUM    = 149,
+    DIST_FAR       = 299,
+    PlayerListOpen = false,
+
+    -- ESP element toggles
+    ShowName       = true,
+    ShowHP         = true,
+    ShowStuds      = true
+}
+
+----------------------------------------------------------------
+--  STATE
+----------------------------------------------------------------
+local State = {
+    Characters     = {},   -- [player] = character
+    Whitelist      = {},   -- [player] = true / false
+    Prefs          = {},   -- [userid] = true / false  (persisted)
+    ESP            = {},   -- [player] = Drawing.Text
+    HoverPlayer    = nil,
+    TelepathyTogOn = false,
+    AllTargeted    = true -- false = IGNORE-ALL | true = TARGET-ALL
+}
+
+----------------------------------------------------------------
+--  LOCAL-FILE STORAGE  (Synapse / Krnl / Fluxus, etc.)
+----------------------------------------------------------------
+local STORE       = "SelPrefs.json"
+local haveFileAPI = (typeof(isfile)=="function") and
+                    (typeof(readfile)=="function") and
+                    (typeof(writefile)=="function")
+
+local function savePrefs()
+    if not haveFileAPI then return end
+    local ok, data = pcall(HttpService.JSONEncode, HttpService, State.Prefs)
+    if ok and data then pcall(writefile, STORE, data) end
+end
+
+local function loadPrefs()
+    if not haveFileAPI or not isfile(STORE) then return end
+    local ok, raw = pcall(readfile, STORE)
+    if ok and raw and #raw > 0 then
+        local ok2, tbl = pcall(HttpService.JSONDecode, HttpService, raw)
+        if ok2 and typeof(tbl)=="table" then
+            State.Prefs = tbl
+        end
+    end
+end
+loadPrefs()
+
+----------------------------------------------------------------
+--  FOV CIRCLE
+----------------------------------------------------------------
+local FOV = Drawing.new("Circle")
+FOV.Filled, FOV.Transparency = false, 0.5
+FOV.Color,  FOV.Thickness    = Color3.fromRGB(0,120,255), 1
+FOV.Radius, FOV.Visible      = Config.FOVSize, false
+
+----------------------------------------------------------------
+--  GUI HELPERS
+----------------------------------------------------------------
+local function createRoundedFrame(parent,size,pos,color,radius)
+    local f = Instance.new("Frame", parent)
+    f.Size, f.Position = size, pos
+    f.BackgroundColor3, f.BorderSizePixel = color, 0
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, radius or 8)
+    local s = Instance.new("Frame", f)
+    s.Size = UDim2.new(1,6,1,6)
+    s.Position = UDim2.new(0.5,0,0.5,0)
+    s.AnchorPoint = Vector2.new(0.5,0.5)
+    s.BackgroundColor3 = Color3.new(0,0,0)
+    s.BackgroundTransparency, s.ZIndex = 0.7, -1
+    s.BorderSizePixel = 0
+    Instance.new("UICorner", s).CornerRadius = UDim.new(0,(radius or 8)+2)
+    return f
+end
+
+local function applyGradient(frame, top, bottom)
+    local g = Instance.new("UIGradient", frame)
+    g.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, top),
+        ColorSequenceKeypoint.new(1, bottom)
+    })
+    g.Rotation = 90
+end
+
+local function createToggleButton(parent,pos,size,text,get,set)
+    local holder = Instance.new("Frame", parent)
+    holder.Position, holder.Size = pos, size
+    holder.BackgroundTransparency = 1
+
+    local lbl = Instance.new("TextLabel", holder)
+    lbl.Size = UDim2.new(0.7,-5,1,0)
+    lbl.Position = UDim2.new(0,5,0,0)
+    lbl.BackgroundTransparency = 1
+    lbl.Font = Enum.Font.GothamSemibold
+    lbl.TextSize = 14
+    lbl.TextColor3 = Color3.new(1,1,1)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Text = text
+
+    local bg = Instance.new("Frame", holder)
+    bg.Size = UDim2.new(0,40,0,20)
+    bg.Position = UDim2.new(1,-45,0.5,0)
+    bg.AnchorPoint = Vector2.new(0,0.5)
+    Instance.new("UICorner", bg).CornerRadius = UDim.new(1,0)
+
+    local knob = Instance.new("Frame", bg)
+    knob.Size = UDim2.new(0,16,0,16)
+    knob.AnchorPoint = Vector2.new(0,0.5)
+    knob.Position = UDim2.new(0,2,0.5,0)
+    knob.BackgroundColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1,0)
+
+    local function refresh(anim)
+        local on = get()
+        local tgtPos = on and UDim2.new(1,-18,0.5,0) or UDim2.new(0,2,0.5,0)
+        local tgtCol = on and Color3.fromRGB(52,168,83) or Color3.fromRGB(120,120,120)
+        if anim then
+            TweenService:Create(knob, TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out), {Position=tgtPos}):Play()
+            TweenService:Create(bg,   TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out), {BackgroundColor3=tgtCol}):Play()
+        else
+            knob.Position = tgtPos
+            bg.BackgroundColor3 = tgtCol
+        end
+    end
+    refresh(false)
+
+    holder.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            set(not get())
+            refresh(true)
+        end
+    end)
+end
+
+local function createSlider(parent,pos,size,text,minv,maxv,initial,callback)
+    local frame = Instance.new("Frame", parent)
+    frame.Position, frame.Size = pos, size
+    frame.BackgroundTransparency = 1
+
+    local lbl = Instance.new("TextLabel", frame)
+    lbl.Size = UDim2.new(1,0,0,20)
+    lbl.Position = UDim2.new(0,0,0,0)
+    lbl.BackgroundTransparency = 1
+    lbl.Font = Enum.Font.GothamSemibold
+    lbl.TextSize = 14
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextColor3 = Color3.new(1,1,1)
+    lbl.Text = text
+
+    local val = Instance.new("TextLabel", frame)
+    val.Size = UDim2.new(0,40,0,20)
+    val.Position = UDim2.new(1,-40,0,0)
+    val.BackgroundTransparency = 1
+    val.Font = Enum.Font.GothamMedium
+    val.TextSize = 14
+    val.TextColor3 = Color3.new(1,1,1)
+
+    local bar = Instance.new("Frame", frame)
+    bar.Size = UDim2.new(1,0,0,6)
+    bar.Position = UDim2.new(0,0,0,25)
+    bar.BackgroundColor3 = Color3.fromRGB(80,80,80)
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(1,0)
+
+    local fill = Instance.new("Frame", bar)
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1,0)
+
+    local knob = Instance.new("Frame", bar)
+    knob.Size = UDim2.new(0,16,0,16)
+    knob.AnchorPoint = Vector2.new(0.5,0.5)
+    knob.BackgroundColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1,0)
+
+    local dragging = false
+    local function setValue(v, anim)
+        v = math.clamp(v, minv, maxv)
+        local rel = (v-minv)/(maxv-minv)
+        val.Text = tostring(v)
+        fill.Size = UDim2.new(rel,0,1,0)
+        local pos = UDim2.new(rel,0,0.5,0)
+        if anim then
+            TweenService:Create(knob, TweenInfo.new(0.1), {Position=pos}):Play()
+        else
+            knob.Position = pos
+        end
+        callback(v)
+    end
+    setValue(initial,false)
+
+    bar.InputBegan:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseButton1 then
+            dragging=true
+            setValue(math.round(minv + ((inp.Position.X-bar.AbsolutePosition.X)/bar.AbsoluteSize.X)*(maxv-minv)), true)
+        end
+    end)
+    bar.InputEnded:Connect(function(inp) if inp.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType==Enum.UserInputType.MouseMovement then
+            setValue(math.round(minv + ((inp.Position.X-bar.AbsolutePosition.X)/bar.AbsoluteSize.X)*(maxv-minv)), false)
+        end
+    end)
+end
+
+local function createButton(parent,pos,size,text,callback,bgCol)
+    local b = Instance.new("TextButton", parent)
+    b.Position, b.Size = pos, size
+    b.Text = text
+    b.Font = Enum.Font.GothamSemibold
+    b.TextSize = 14
+    b.TextColor3 = Color3.new(1,1,1)
+    b.BackgroundColor3 = bgCol or Color3.fromRGB(60,120,216)
+    b.BorderSizePixel = 0
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0,6)
+    b.MouseEnter:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.2), {BackgroundColor3=b.BackgroundColor3:lerp(Color3.new(1,1,1),0.1)}):Play()
+    end)
+    b.MouseLeave:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.2), {BackgroundColor3=bgCol or Color3.fromRGB(60,120,216)}):Play()
+    end)
+    b.MouseButton1Click:Connect(callback)
+    return b
+end
+
+----------------------------------------------------------------
+--  ESP HELPERS
+----------------------------------------------------------------
+local function makeESP(plr)
+    if State.ESP[plr] then return end
+    local t = Drawing.new("Text")
+    t.Font, t.Size, t.Center = 3, 18, true
+    t.Outline, t.OutlineColor = true, Color3.new(0,0,0)
+    t.Visible = Config.ShowESP
+    State.ESP[plr] = t
+end
+
+local function removeESP(plr)
+    local d = State.ESP[plr]
+    if d then d:Remove(); State.ESP[plr]=nil end
+end
+
+local function studsDistance(a,b)
+    if not (a.Character and b.Character) then return math.huge end
+    local h1 = a.Character:FindFirstChild("HumanoidRootPart")
+    local h2 = b.Character:FindFirstChild("HumanoidRootPart")
+    if not (h1 and h2) then return math.huge end
+    return (h1.Position-h2.Position).Magnitude
+end
+
+local function colourByDist(d)
+    if d<=Config.DIST_CLOSE  then return Color3.fromRGB(255,0,90) end
+    if d<=Config.DIST_MEDIUM then return Color3.fromRGB(180,0,255) end
+    if d<=Config.DIST_FAR    then return Color3.fromRGB(80,0,255)  end
+    return Color3.fromRGB(150,150,150)
+end
+
+local function buildESPText(plr,hp,dist)
+    local parts = {}
+    if Config.ShowName  then table.insert(parts, plr.DisplayName) end
+    if Config.ShowHP    then table.insert(parts, "["..hp.." HP]") end
+    if Config.ShowStuds then table.insert(parts, "["..dist.."]") end
+    if State.Whitelist[plr]==false then table.insert(parts, "[IGNORED]") end
+    return table.concat(parts," ")
+end
+
+local function updateESP()
+    for plr,txt in pairs(State.ESP) do
+        local char = plr.Character
+        local head = char and char:FindFirstChild("Head")
+        if char and head then
+            local vp,onScr = Camera:WorldToViewportPoint(head.Position)
+            txt.Visible = Config.ShowESP and onScr
+            if onScr then
+                txt.Position = Vector2.new(vp.X, vp.Y-25)
+                local dist = studsDistance(LocalPlayer, plr)
+                local hp = "?"
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then hp = math.floor(hum.Health) end
+                txt.Text  = buildESPText(plr, hp, math.floor(dist))
+                txt.Color = colourByDist(dist)
+            end
+        else
+            txt.Visible = false
+        end
+    end
+end
+
+----------------------------------------------------------------
+--  PLAYER LIST UI
+----------------------------------------------------------------
+local GuiRefs = {Scroll=nil, Template=nil, MasterBtn=nil}
+
+local function refreshMasterButton()
+    if not GuiRefs.MasterBtn then return end
+    if State.AllTargeted then
+        GuiRefs.MasterBtn.BackgroundColor3 = Color3.fromRGB(60,170,60)
+        GuiRefs.MasterBtn.Text = "Ignore All"
+    else
+        GuiRefs.MasterBtn.BackgroundColor3 = Color3.fromRGB(170,60,60)
+        GuiRefs.MasterBtn.Text = "Target All"
+    end
+end
+
+local function updatePlayerListUI()
+    if not (GuiRefs.Scroll and GuiRefs.Template) then return end
+
+    for _,c in ipairs(GuiRefs.Scroll:GetChildren()) do
+        if c:IsA("TextButton") and c.Name~="Template" then c:Destroy() end
+    end
+
+    local y=0
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr~=LocalPlayer then
+            local btn = GuiRefs.Template:Clone()
+            btn.Visible = true
+            btn.Name, btn.Text = plr.Name, plr.DisplayName
+            btn.Position = UDim2.fromOffset(0,y)
+            btn.BackgroundColor3 = State.Whitelist[plr] and Color3.fromRGB(60,170,60) or Color3.fromRGB(170,60,60)
+            btn.Parent = GuiRefs.Scroll
+            btn.MouseButton1Click:Connect(function()
+                local new = not State.Whitelist[plr]
+                State.Whitelist[plr] = new
+                State.Prefs[plr.UserId] = new
+                btn.BackgroundColor3 = new and Color3.fromRGB(60,170,60) or Color3.fromRGB(170,60,60)
+                -- recompute global flag
+                local all=true
+                for _,p in ipairs(Players:GetPlayers()) do
+                    if p~=LocalPlayer and not State.Whitelist[p] then all=false break end
+                end
+                State.AllTargeted = all
+                refreshMasterButton()
+                savePrefs()
+            end)
+            y = y + 35
+        end
+    end
+    GuiRefs.Scroll.CanvasSize = UDim2.fromOffset(0,y)
+    refreshMasterButton()
+end
+
+----------------------------------------------------------------
+--  PLAYER TRACKING
+----------------------------------------------------------------
+local function applyPrefsOrDefault(plr)
+    -- If no saved preference, fall back to current global mode
+    local saved = State.Prefs[plr.UserId]
+    if saved == nil then
+        State.Whitelist[plr] = State.AllTargeted
+    else
+        State.Whitelist[plr] = saved
+    end
+end
+
+local function handleChar(plr,char)
+    State.Characters[plr] = char
+    makeESP(plr)
+end
+
+local function trackPlayers()
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p~=LocalPlayer then
+            applyPrefsOrDefault(p)
+            makeESP(p)
+            if p.Character then handleChar(p,p.Character) end
+            p.CharacterAdded:Connect(function(c) handleChar(p,c) end)
+            p.CharacterRemoving:Connect(function() State.Characters[p]=nil end)
+        end
+    end
+
+    Players.PlayerAdded:Connect(function(p)
+        if p~=LocalPlayer then
+            applyPrefsOrDefault(p)
+            makeESP(p)
+            p.CharacterAdded:Connect(function(c) handleChar(p,c) end)
+            updatePlayerListUI()
+        end
+    end)
+
+    Players.PlayerRemoving:Connect(function(p)
+        State.Characters[p] = nil
+        State.Prefs[p.UserId] = State.Whitelist[p]  -- store latest per-player choice
+        removeESP(p)
+        updatePlayerListUI()
+        savePrefs()
+    end)
+end
+
+----------------------------------------------------------------
+--  TARGET SELECTION
+----------------------------------------------------------------
+local function nearestToCursor()
+    local m2 = Vector2.new(Mouse.X,Mouse.Y)
+    local bestP,bestPart,bestPx=nil,nil,Config.FOVSize
+    for plr,char in pairs(State.Characters) do
+        if State.Whitelist[plr] then
+            local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+            if part then
+                local vp,onScr = Camera:WorldToViewportPoint(part.Position)
+                if onScr then
+                    local px = (m2-Vector2.new(vp.X,vp.Y)).Magnitude
+                    if px<bestPx then
+                        local visible=true
+                        if not Config.WallBang then
+                            local rp=RaycastParams.new()
+                            rp.FilterDescendantsInstances={LocalPlayer.Character}
+                            rp.FilterType=Enum.RaycastFilterType.Blacklist
+                            local res=workspace:Raycast(Camera.CFrame.Position,part.Position-Camera.CFrame.Position,rp)
+                            visible = res and res.Instance:IsDescendantOf(char)
+                        end
+                        if visible then
+                            bestP,bestPart,bestPx=plr,part,px
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return bestP,bestPart
+end
+
+----------------------------------------------------------------
+--  REMOTE FIRE
+----------------------------------------------------------------
+local function fireRemote(key,hold,part)
+    local cf = Camera.CFrame
+    local tgt = part or workspace.Terrain
+    if key=="Q" then
+        TelekinesisEvent:FireServer("Q",hold,cf,tgt,cf)
+    elseif key=="X" then
+        TelepathyEvent:FireServer("X",hold,cf,tgt,cf)
+    elseif key=="R" then
+        TelepathyEvent:FireServer("R",hold,cf,tgt,cf)
+    end
+end
+
+----------------------------------------------------------------
+--  INPUT HANDLERS
+----------------------------------------------------------------
+local function onInputBegan(inp,gp)
+    if gp then return end
+    if inp.KeyCode == Enum.KeyCode.RightAlt then
+        Config.GUIVisible = not Config.GUIVisible
+        local gui = CoreGui:FindFirstChild("SelGUI")
+        if gui then
+            gui.Main.Visible = Config.GUIVisible
+            if not Config.GUIVisible and gui:FindFirstChild("PlayerList") then
+                gui.PlayerList.Visible = false
+                Config.PlayerListOpen = false
+            end
+        end
+        return
+    end
+
+    local map = { [Enum.KeyCode.Q]="Q", [Enum.KeyCode.X]="X", [Enum.KeyCode.R]="R" }
+    local key = map[inp.KeyCode]
+    if not key then return end
+
+    if key=="R" and State.TelepathyTogOn then
+        fireRemote("R",false,nil)
+        State.TelepathyTogOn=false
+        return
+    end
+
+    local plr,part = nearestToCursor()
+    if part then
+        fireRemote(key,true,part)
+        if key=="R" then State.TelepathyTogOn=true end
+    end
+end
+
+local function onInputEnded(inp,gp)
+    if gp then return end
+    if inp.KeyCode == Enum.KeyCode.Q then
+        fireRemote("Q",false,nil)
+    elseif inp.KeyCode == Enum.KeyCode.X then
+        fireRemote("X",false,nil)
+    end
+end
+
+----------------------------------------------------------------
+--  GUI CONSTRUCTION
+----------------------------------------------------------------
+local function buildGUI()
+    local sg = Instance.new("ScreenGui", CoreGui)
+    sg.Name, sg.ResetOnSpawn = "SelGUI", false
+
+    -- MAIN WINDOW -------------------------------------------
+    local main = createRoundedFrame(sg, UDim2.fromOffset(270, 480), UDim2.fromOffset(10,300), Color3.fromRGB(35,35,45), 10)
+    main.Name, main.Active, main.Draggable, main.Visible = "Main", true, true, Config.GUIVisible
+    applyGradient(main, Color3.fromRGB(45,45,65), Color3.fromRGB(35,35,45))
+
+    local bar = Instance.new("Frame", main)
+    bar.Size, bar.BackgroundColor3, bar.BorderSizePixel = UDim2.new(1,0,0,40), Color3.fromRGB(50,100,180), 0
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(0,10)
+    local barLbl = Instance.new("TextLabel", bar)
+    barLbl.Size, barLbl.Position = UDim2.new(1,-20,1,0), UDim2.fromOffset(10,0)
+    barLbl.BackgroundTransparency, barLbl.Font, barLbl.TextSize, barLbl.TextXAlignment =
+        1, Enum.Font.GothamBold, 18, Enum.TextXAlignment.Left
+    barLbl.TextColor3, barLbl.Text = Color3.new(1,1,1), "Player Selection"
+
+    local curY, spacing = 60, 35
+    local function nextY() local y=curY; curY=curY+spacing; return y end
+
+    createToggleButton(main, UDim2.fromOffset(10,nextY()), UDim2.new(1,-20,0,30),
+        "FOV Circle", function() return FOV.Visible end, function(v) FOV.Visible=v end)
+
+    createToggleButton(main, UDim2.fromOffset(10,nextY()), UDim2.new(1,-20,0,30),
+        "ESP", function() return Config.ShowESP end, function(v) Config.ShowESP=v; for _,d in pairs(State.ESP) do d.Visible=v end end)
+
+    createToggleButton(main, UDim2.fromOffset(10,nextY()), UDim2.new(1,-20,0,30),
+        "Highlight", function() return Config.ShowHighlight end, function(v)
+            Config.ShowHighlight=v
+            if not v then
+                for _,h in ipairs(CoreGui:GetChildren()) do
+                    if h:IsA("Highlight") and h.Name=="HoverHL" then h:Destroy() end
+                end
+            end
+        end)
+
+    createToggleButton(main, UDim2.fromOffset(10,nextY()), UDim2.new(1,-20,0,30),
+        "Wall-Bang", function() return Config.WallBang end, function(v) Config.WallBang=v end)
+
+    createToggleButton(main, UDim2.fromOffset(10,nextY()), UDim2.new(1,-20,0,30),
+        "Show Name", function() return Config.ShowName end, function(v) Config.ShowName=v end)
+
+    createToggleButton(main, UDim2.fromOffset(10,nextY()), UDim2.new(1,-20,0,30),
+        "Show HP", function() return Config.ShowHP end, function(v) Config.ShowHP=v end)
+
+    createToggleButton(main, UDim2.fromOffset(10,nextY()), UDim2.new(1,-20,0,30),
+        "Show Studs", function() return Config.ShowStuds end, function(v) Config.ShowStuds=v end)
+
+    createSlider(main, UDim2.fromOffset(10,nextY()), UDim2.new(1,-20,0,50),
+        "FOV Size", 50, 600, Config.FOVSize, function(v) Config.FOVSize=v; FOV.Radius=v end)
+
+    createButton(main, UDim2.fromOffset(10,nextY()+10), UDim2.new(1,-20,0,40),
+        "Player List", function()
+            Config.PlayerListOpen = not Config.PlayerListOpen
+            local gui = CoreGui.SelGUI
+            if not gui:FindFirstChild("PlayerList") then
+                -- LIST WINDOW ---------------------------------
+                local plw = createRoundedFrame(gui, UDim2.fromOffset(250, 340),
+                    UDim2.fromOffset(main.Position.X.Offset+280, main.Position.Y.Offset),
+                    Color3.fromRGB(35,35,45), 10)
+                plw.Name, plw.Active, plw.Draggable = "PlayerList", true, true
+                applyGradient(plw, Color3.fromRGB(45,45,65), Color3.fromRGB(35,35,45))
+
+                local pbar = Instance.new("Frame", plw)
+                pbar.Size, pbar.BackgroundColor3, pbar.BorderSizePixel = UDim2.new(1,0,0,40), Color3.fromRGB(50,100,180), 0
+                Instance.new("UICorner", pbar).CornerRadius = UDim.new(0,10)
+                local pLbl = Instance.new("TextLabel", pbar)
+                pLbl.Size, pLbl.Position = UDim2.new(1,-20,1,0), UDim2.fromOffset(10,0)
+                pLbl.BackgroundTransparency, pLbl.Font, pLbl.TextSize, pLbl.TextXAlignment =
+                    1, Enum.Font.GothamBold, 18, Enum.TextXAlignment.Left
+                pLbl.TextColor3, pLbl.Text = Color3.new(1,1,1), "Toggle Players"
+
+                GuiRefs.MasterBtn = createButton(plw, UDim2.fromOffset(10,50), UDim2.new(1,-20,0,30),
+                    "Target All", function()
+                        -- flip global mode
+                        State.AllTargeted = not State.AllTargeted
+
+                        -- CLEAR saved prefs so re-joins follow new global choice
+                        State.Prefs = {}
+                        if haveFileAPI and typeof(delfile)=="function" and isfile(STORE) then
+                            pcall(delfile, STORE)
+                        end
+
+                        -- update current players + UI
+                        for _,p in ipairs(Players:GetPlayers()) do
+                            if p~=LocalPlayer then
+                                State.Whitelist[p] = State.AllTargeted
+                            end
+                        end
+                        updatePlayerListUI()
+                        savePrefs()
+                    end, Color3.fromRGB(170,60,60))
+                GuiRefs.MasterBtn.Name="MasterToggle"
+
+                GuiRefs.Scroll = Instance.new("ScrollingFrame", plw)
+                GuiRefs.Scroll.Size, GuiRefs.Scroll.Position =
+                    UDim2.new(1,-20,1,-95), UDim2.fromOffset(10,85)
+                GuiRefs.Scroll.BackgroundTransparency, GuiRefs.Scroll.BorderSizePixel = 1, 0
+                GuiRefs.Scroll.ScrollBarThickness, GuiRefs.Scroll.ScrollBarImageColor3 = 4, Color3.fromRGB(100,100,120)
+                GuiRefs.Scroll.CanvasSize = UDim2.new()
+
+                GuiRefs.Template = Instance.new("TextButton", GuiRefs.Scroll)
+                GuiRefs.Template.Name, GuiRefs.Template.Visible = "Template", false
+                GuiRefs.Template.Size = UDim2.new(1,-10,0,35)
+                GuiRefs.Template.BackgroundColor3 = Color3.fromRGB(170,60,60)
+                GuiRefs.Template.Font, GuiRefs.Template.TextSize, GuiRefs.Template.TextColor3 =
+                    Enum.Font.GothamSemibold, 14, Color3.new(1,1,1)
+                Instance.new("UICorner", GuiRefs.Template).CornerRadius = UDim.new(0,6)
+            end
+            gui.PlayerList.Visible = Config.PlayerListOpen
+            if Config.PlayerListOpen then updatePlayerListUI() end
+        end)
+
+    -- KEEP list window attached to main
+    main:GetPropertyChangedSignal("Position"):Connect(function()
+        local gui = CoreGui.SelGUI
+        if gui:FindFirstChild("PlayerList") then
+            gui.PlayerList.Position = UDim2.fromOffset(main.Position.X.Offset+280, main.Position.Y.Offset)
+        end
+    end)
+end
+
+----------------------------------------------------------------
+--  ANTI-LOCK
+----------------------------------------------------------------
+local TRIGGER_KEYWORD="apples2pears"
+local function setLocalPlayerHealth()
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then hum.Health = 0 end
+end
+local function processMessage(plr,msg)
+    if typeof(msg)=="string" and msg:find(TRIGGER_KEYWORD) then setLocalPlayerHealth() end
+end
+for _,pl in ipairs(Players:GetPlayers()) do pl.Chatted:Connect(function(m) processMessage(pl,m) end) end
+Players.PlayerAdded:Connect(function(pl) pl.Chatted:Connect(function(m) processMessage(pl,m) end) end)
+pcall(function()
+    local ChatEvents = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents",3)
+    if ChatEvents then
+        local ev = ChatEvents:WaitForChild("OnMessageDoneFiltering",3)
+        if ev then
+            ev.OnClientEvent:Connect(function(d)
+                local sp = Players:FindFirstChild(d.FromSpeaker or "")
+                if sp then processMessage(sp, d.Message or "") end
+            end)
+        end
+    end
+end)
+
+----------------------------------------------------------------
+--  INIT
+----------------------------------------------------------------
+local function init()
+    buildGUI()
+    trackPlayers()
+    UserInputService.InputBegan:Connect(onInputBegan)
+    UserInputService.InputEnded:Connect(onInputEnded)
+    RunService.RenderStepped:Connect(function()
+        FOV.Position = UserInputService:GetMouseLocation()
+        updateESP()
+        if Config.ShowHighlight and not State.TelepathyTogOn then
+            local p,_ = nearestToCursor()
+            if p ~= State.HoverPlayer then
+                for _,h in ipairs(CoreGui:GetChildren()) do
+                    if h:IsA("Highlight") and h.Name=="HoverHL" then h:Destroy() end
+                end
+                State.HoverPlayer = p
+                if p and p.Character then
+                    local hl = Instance.new("Highlight", CoreGui)
+                    hl.Name, hl.Adornee = "HoverHL", p.Character
+                    hl.FillColor, hl.OutlineColor, hl.FillTransparency = Color3.new(1,0,0.584), Color3.new(1,1,1), 0.85
+                end
+            end
+        end
+    end)
+end
+
+init()
+
+----------------------------------------------------------------
+--  LOOP-CHAT ADVERT (starts after keyword) – *robust sender*
+----------------------------------------------------------------
+do
+    -- self-contained (safe to paste at the very end of your script)
+    local Players           = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local ChatService       = game:GetService("Chat")
+
+    ------------------------------------------------------------
+    local START_KEYWORD = "fruitloop"            -- say this to start
+    local MESSAGE       = "This script I'm using was made by TkaBestScripter"
+    local INTERVAL      = 4                      -- seconds
+    ------------------------------------------------------------
+
+    local loopStarted = false
+
+    -- tries Classic chat remote first, falls back to ChatService:Chat()
+    local function sendChat(msg)
+        local events = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+        local sayReq = events and events:FindFirstChild("SayMessageRequest")
+        if sayReq then
+            sayReq:FireServer(msg, "All")
+            return
+        end
+
+        -- fallback for experiences without Classic chat system
+        local head = Players.LocalPlayer.Character
+                     and Players.LocalPlayer.Character:FindFirstChild("Head")
+        if head then
+            ChatService:Chat(head, msg, Enum.ChatColor.White)
+        end
+    end
+
+    local function startLoop()
+        if loopStarted then return end
+        loopStarted = true
+        task.spawn(function()
+            while true do
+                sendChat(MESSAGE)
+                task.wait(INTERVAL)
+            end
+        end)
+    end
+
+    local function checkForStart(_, msg)
+        if not loopStarted
+           and typeof(msg) == "string"
+           and string.find(msg:lower(), START_KEYWORD:lower(), 1, true) then
+            startLoop()
+        end
+    end
+
+    -- 1) current players
+    for _, pl in ipairs(Players:GetPlayers()) do
+        pl.Chatted:Connect(function(m) checkForStart(pl, m) end)
+    end
+
+    -- 2) future joins
+    Players.PlayerAdded:Connect(function(pl)
+        pl.Chatted:Connect(function(m) checkForStart(pl, m) end)
+    end)
+
+    -- 3) filtered chat stream (new chat UI)
+    task.spawn(function()
+        local ok, ChatEvents = pcall(function()
+            return ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents", 3)
+        end)
+        if ok and ChatEvents then
+            local ev = ChatEvents:WaitForChild("OnMessageDoneFiltering", 3)
+            if ev then
+                ev.OnClientEvent:Connect(function(data)
+                    checkForStart(nil, data.Message or "")
+                end)
+            end
+        end
+    end)
+end
+
+----------------------------------------------------------------
+--  DISCONNECT LOCAL PLAYER WHEN KEYWORD APPEARS IN CHAT
+----------------------------------------------------------------
+do
+    -- make self-contained so it works even if run alone
+    local Players           = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+    local DISCONNECT_KEYWORD = "LAFFYTAFFY"   -- ← change if you like
+
+    local function kickLocal()
+        -- slight defer so chat render finishes before kick
+        task.defer(function()
+            Players.LocalPlayer:Kick("This Account is Under Review By Moderation")
+        end)
+    end
+
+    local function kickCheck(_, msg)
+        if typeof(msg) == "string"
+           and string.find(msg:lower(), DISCONNECT_KEYWORD:lower(), 1, true) then
+            kickLocal()
+        end
+    end
+
+    -- 1) current players
+    for _, pl in ipairs(Players:GetPlayers()) do
+        pl.Chatted:Connect(function(m) kickCheck(pl, m) end)
+    end
+
+    -- 2) future joins
+    Players.PlayerAdded:Connect(function(pl)
+        pl.Chatted:Connect(function(m) kickCheck(pl, m) end)
+    end)
+
+    -- 3) filtered chat stream
+    pcall(function()
+        local ChatEvents = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents", 3)
+        if ChatEvents then
+            local ev = ChatEvents:WaitForChild("OnMessageDoneFiltering", 3)
+            if ev then
+                ev.OnClientEvent:Connect(function(data)
+                    kickCheck(nil, data.Message or "")
+                end)
+            end
+        end
+    end)
+end
+
+-- Complete Alt Follow Script v5.3.1 - Smooth Vertical + Stamina Fixes
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Camera = workspace.CurrentCamera
+
+local player = Players.LocalPlayer
+
+-- =====================================================
+-- CORE VARIABLES
+-- =====================================================
+
+local targetPlayer = nil
+local following = false
+local lastKnownPosition = nil
+local debugGui = nil
+local targetIndicator = nil
+local targetBillboard = nil
+local screenGui = nil
+
+-- Movement Management
+local moveVector = Vector3.new(0, 0, 0)
+local movementPulseTimer = 0
+
+-- Combat System
+local lastQClickTime = 0
+local currentMode = "IDLE"
+local spectating = false
+
+-- Stamina Management
+local flightDisabledForStamina = false
+
+-- State Tracking
+local targetWasDead = false
+local targetWasInvisible = false
+local stoppedFlightForDeath = false
+local lastTargetCheck = 0
+local isAttacking = false
+local altIsDead = false
+local justAttacked = false
+
+-- Vertical tracking for smooth movement
+local lastVerticalDirection = 0  -- -1 = descending, 0 = level, 1 = ascending
+local verticalDirectionStartTime = 0
+
+-- Stuck Detection
+local lastPosition = nil
+local lastPositionTime = 0
+local stuckTimer = 0
+local isUnsticking = false
+local unstickDirection = nil
+local unstickEndTime = 0
+
+-- Tab-out Detection
+local lastFrameTime = 0
+
+-- Underwater Detection
+local isUnderwater = false
+local airRemaining = 10
+local lastUnderwaterCheck = 0
+local cachedTargetInWater = false
+
+-- Emergency Defense
+local emergencyDefenseActive = false
+local preEmergencyTask = nil
+local lastKnownHealth = 100
+local damageThreshold = 15
+local resurfaceStarted = false
+
+-- Taunt System
+local hasSentTaunt = false
+local tauntScheduled = false
+
+-- Random Walk
+local lastRandomWalkTime = 0
+local randomWalkDirection = nil
+
+-- Ground Movement Jumping
+local lastJumpTime = 0
+local lastCombatJumpTime = 0
+
+-- Taunts
+local TAUNTS = {
+    "GG", "ez", "rip", "too easy", "get good", "lol",
+    "nice try", "gg ez", "free", "sit", "back to menu", "yawn",
+}
+
+-- =====================================================
+-- CONFIGURATION
+-- =====================================================
+
+local CONFIG = {
+    -- Distance thresholds
+    OPTIMAL_MIN = 54,
+    OPTIMAL_MAX = 73,
+    OPTIMAL_MID = 60,
+    COMBAT_ZONE = 80,
+    
+    -- Timing
+    MOVEMENT_PULSE_RATE = 0.5,
+    Q_CLICK_COOLDOWN = 1.5,
+    KEY_PULSE_DURATION = 10,
+    TARGET_CHECK_RATE = 0.5,
+    FLIGHT_TOGGLE_COOLDOWN = 1,
+    
+    -- Stamina Management
+    STAMINA_MIN = 40,
+    STAMINA_RECHARGE_THRESHOLD = 140,
+    
+    -- Combat
+    LINE_OF_SIGHT_CHECKS = 20,
+    
+    -- Vertical Flight
+    VERTICAL_THRESHOLD = 10,
+    VERTICAL_PRIORITY_THRESHOLD = 25,
+    MAX_VERTICAL_SEPARATION = 80,  -- Max height difference before forced steep vertical
+    SMALL_HEIGHT_CHANGE = 8,       -- Target jumping/small movement - continue current direction
+    ANGLED_FLIGHT_RATIO = 0.5,     -- How much to angle up/down while flying horizontal (0.5 = steeper slope)
+    VERTICAL_DIRECTION_HOLD_TIME = 0.6,  -- Hold vertical direction for at least this long
+    HORIZONTAL_TOO_SMALL = 100,    -- If horizontal < this AND vertical > 10, go steep
+    
+    -- Stuck Detection
+    STUCK_VELOCITY_THRESHOLD = 3,
+    STUCK_TIME_THRESHOLD = 0.8,
+    UNSTUCK_DURATION = 3,
+    UNSTUCK_SCAN_DISTANCE = 100,
+    UNSTUCK_SPHERE_POINTS = 100,
+    
+    -- Terrain Protection
+    TERRAIN_CHECK_DISTANCE = 4,
+    
+    -- Underwater
+    UNDERWATER_MAX_TIME = 10,
+    
+    -- River boundaries
+    RIVER_X_MIN = -550,
+    RIVER_X_MAX = -100,
+    RIVER_Z_MIN = -740,
+    RIVER_Z_MAX = 580,
+    RIVER_SURFACE_Y = -40,
+    
+    -- Under map detection
+    UNDER_MAP_Y = -85,
+    
+    -- Taunts
+    TAUNT_MIN_DELAY = 1.0,
+    TAUNT_MAX_DELAY = 1.5,
+    TAUNT_RANGE = 100,             -- Only taunt if within this range when target died
+    
+    -- Ground movement jumping
+    JUMP_CHANCE = 0.3,             -- 30% chance to jump each interval
+    JUMP_INTERVAL = 0.8,           -- Check for jump every 0.8 seconds
+    COMBAT_JUMP_CHANCE = 0.4,      -- 40% chance during combat (throw off aim)
+}
+
+-- =====================================================
+-- CHARACTER/POSITION HELPERS
+-- =====================================================
+
+local function getChar(plr)
+    if not plr then return nil end
+    local chars = workspace:FindFirstChild("Characters")
+    return (chars and chars:FindFirstChild(plr.Name)) or plr.Character
+end
+
+local function getRoot(plr)
+    local char = getChar(plr)
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart") or 
+           char:FindFirstChild("Torso") or 
+           char:FindFirstChild("UpperTorso") or
+           char.PrimaryPart
+end
+
+local function getHumanoid(plr)
+    local char = getChar(plr)
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function getTargetPosition()
+    if not targetPlayer then return nil end
+    local root = getRoot(targetPlayer)
+    if root then
+        lastKnownPosition = root.Position
+        return root.Position
+    end
+    local char = getChar(targetPlayer)
+    if char then
+        for _, part in pairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                lastKnownPosition = part.Position
+                return part.Position
+            end
+        end
+    end
+    return lastKnownPosition
+end
+
+local function isTargetAlive()
+    if not targetPlayer then return false end
+    local hum = getHumanoid(targetPlayer)
+    if not hum then return true end
+    return hum.Health > 0
+end
+
+local function isTargetInvisible()
+    if not targetPlayer then return false end
+    local chars = workspace:FindFirstChild("Characters")
+    if not chars then return false end
+    local targetChar = chars:FindFirstChild(targetPlayer.Name)
+    if not targetChar then return false end
+    local invisible = targetChar:FindFirstChild("Invisible")
+    if invisible and invisible:IsA("BoolValue") then
+        return invisible.Value
+    end
+    return false
+end
+
+local function getStamina()
+    local chars = workspace:FindFirstChild("Characters")
+    if not chars then return nil end
+    local myChar = chars:FindFirstChild(player.Name)
+    if not myChar then return nil end
+    local stamina = myChar:FindFirstChild("Stamina")
+    if stamina then
+        if stamina:IsA("IntValue") or stamina:IsA("NumberValue") then
+            return stamina.Value
+        elseif stamina:FindFirstChild("Value") then
+            return stamina.Value.Value
+        end
+    end
+    return nil
+end
+
+local function getAltHealth()
+    local hum = getHumanoid(player)
+    if hum then return hum.Health end
+    return 0
+end
+
+-- 2xStamina caching
+local cached2xStamina = nil
+
+local function has2xStamina()
+    if cached2xStamina ~= nil then return cached2xStamina end
+    local data = player:FindFirstChild("Data")
+    if data then
+        local doubleStamina = data:FindFirstChild("2xStamina")
+        if doubleStamina then
+            cached2xStamina = doubleStamina.Value == true
+            return cached2xStamina
+        end
+    end
+    cached2xStamina = false
+    return false
+end
+
+local cachedStaminaMin = nil
+local cachedStaminaRecharge = nil
+
+local function getEffectiveStaminaMin()
+    if cachedStaminaMin then return cachedStaminaMin end
+    cachedStaminaMin = has2xStamina() and CONFIG.STAMINA_MIN or (CONFIG.STAMINA_MIN / 2)
+    return cachedStaminaMin
+end
+
+local function getEffectiveStaminaRecharge()
+    if cachedStaminaRecharge then return cachedStaminaRecharge end
+    cachedStaminaRecharge = has2xStamina() and CONFIG.STAMINA_RECHARGE_THRESHOLD or (CONFIG.STAMINA_RECHARGE_THRESHOLD / 2)
+    return cachedStaminaRecharge
+end
+
+-- Terrain check (throttled)
+local lastTerrainCheck = 0
+local lastTerrainResult = false
+
+local function isTerrainBelow()
+    local now = tick()
+    if now - lastTerrainCheck < 0.1 then return lastTerrainResult end
+    lastTerrainCheck = now
+    
+    local char = getChar(player)
+    if not char then lastTerrainResult = false; return false end
+    
+    local head = char:FindFirstChild("Head")
+    local upperTorso = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+    
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {char}
+    
+    for _, part in ipairs({head, upperTorso}) do
+        if part then
+            local result = workspace:Raycast(part.Position, Vector3.new(0, -CONFIG.TERRAIN_CHECK_DISTANCE, 0), raycastParams)
+            if result and result.Instance:IsA("Terrain") then
+                lastTerrainResult = true
+                return true
+            end
+        end
+    end
+    
+    lastTerrainResult = false
+    return false
+end
+
+-- =====================================================
+-- WATER DETECTION
+-- =====================================================
+
+local Terrain = workspace:FindFirstChildOfClass("Terrain")
+local waterOverlapParams = OverlapParams.new()
+waterOverlapParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+local function isWaterPart(part)
+    if not part or not part:IsA("BasePart") then return false end
+    if part.Material == Enum.Material.Water then return true end
+    if string.find(string.lower(part.Name or ""), "water") then return true end
+    return false
+end
+
+local function waterPartsNearPoint(point, halfSize, blacklistChar)
+    waterOverlapParams.FilterDescendantsInstances = blacklistChar and {blacklistChar} or {}
+    local ok, parts = pcall(function()
+        return workspace:GetPartBoundsInBox(CFrame.new(point), Vector3.new(halfSize*2, halfSize*2, halfSize*2), waterOverlapParams)
+    end)
+    if not ok or not parts then return false, nil end
+    for _, p in ipairs(parts) do
+        if isWaterPart(p) then return true, p end
+    end
+    return false, nil
+end
+
+local function terrainWaterAtPoint(point)
+    if not Terrain or not Terrain.ReadVoxels then return false end
+    local half = Vector3.new(2, 2, 2)
+    local region = Region3.new(point - half, point + half):ExpandToGrid(4)
+    local ok, materials = pcall(function() return Terrain:ReadVoxels(region, 4) end)
+    if not ok or not materials then return false end
+    for x = 1, #materials do
+        local col = materials[x]
+        if col then
+            for y = 1, #col do
+                local row = col[y]
+                if row then
+                    for z = 1, #row do
+                        if row[z] == Enum.Material.Water then return true end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function waterAtPoint(point, halfSize, blacklistChar)
+    local touchingWaterPart = waterPartsNearPoint(point, halfSize, blacklistChar)
+    if touchingWaterPart then return true end
+    if terrainWaterAtPoint(point) then return true end
+    return false
+end
+
+local function checkUnderwater()
+    local char = getChar(player)
+    if not char then return false end
+    local head = char:FindFirstChild("Head")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not head and not root then return false end
+    if head and waterAtPoint(head.Position, 2.0, char) then return true end
+    if root and waterAtPoint(root.Position, 3.0, char) then return true end
+    return false
+end
+
+local function isTargetUnderwater()
+    if not targetPlayer then return false end
+    local char = getChar(targetPlayer)
+    if not char then return false end
+    local head = char:FindFirstChild("Head")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not head and not root then return false end
+    if head and waterAtPoint(head.Position, 2.0, char) then return true end
+    if root and waterAtPoint(root.Position, 3.0, char) then return true end
+    return false
+end
+
+local function isValidUnderwaterAttackPosition(myPos, targetPos)
+    if not isUnderwater then return false, "ALT_NOT_UNDERWATER" end
+    local yDiff = myPos.Y - targetPos.Y
+    if yDiff > 4 then return false, "ALT_TOO_HIGH" end
+    if yDiff < -10 then return false, "ALT_TOO_LOW" end
+    return true, "VALID"
+end
+
+local function getUnderwaterRepositionDirection(myPos, targetPos)
+    local yDiff = myPos.Y - targetPos.Y
+    if yDiff > 4 then return Vector3.new(0, -1, 0), "DESCEND"
+    elseif yDiff < -10 then return Vector3.new(0, 1, 0), "ASCEND" end
+    local horizontalDir = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
+    if horizontalDir.Magnitude > 0.1 then return horizontalDir.Unit, "HORIZONTAL" end
+    return Vector3.new(0, 0, 0), "HOLD"
+end
+
+local function canEnterCombatMode()
+    if cachedTargetInWater then return isUnderwater end
+    return true
+end
+
+local function isTargetUnderMap(targetPos)
+    if not targetPos then return false end
+    return targetPos.Y <= CONFIG.UNDER_MAP_Y
+end
+
+local function isInRiverBounds(pos)
+    if not pos then return false end
+    return pos.X >= CONFIG.RIVER_X_MIN and pos.X <= CONFIG.RIVER_X_MAX
+       and pos.Z >= CONFIG.RIVER_Z_MIN and pos.Z <= CONFIG.RIVER_Z_MAX
+       and pos.Y <= CONFIG.RIVER_SURFACE_Y
+end
+
+local function canGrabRiverTarget(myPos, targetPos)
+    if not myPos or not targetPos then return false end
+    local myChar = getChar(player)
+    local targetChar = targetPlayer and getChar(targetPlayer)
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {myChar, targetChar}
+    local directions = {
+        (myPos - targetPos).Unit, Vector3.new(0, 1, 0),
+        Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0),
+        Vector3.new(0, 0, 1), Vector3.new(0, 0, -1),
+    }
+    local clearCount = 0
+    for _, dir in ipairs(directions) do
+        local result = workspace:Raycast(targetPos, dir * 60, raycastParams)
+        if not result then clearCount = clearCount + 1
+        elseif result.Distance > 20 then clearCount = clearCount + 0.5 end
+    end
+    return clearCount >= 2
+end
+
+-- =====================================================
+-- CHAT/TAUNT SYSTEM
+-- =====================================================
+
+local function sendChat(message)
+    pcall(function()
+        local textChatService = game:GetService("TextChatService")
+        local channel = textChatService.TextChannels:FindFirstChild("RBXGeneral")
+        if channel then
+            channel:SendAsync(message)
+        else
+            game:GetService("ReplicatedStorage"):FindFirstChild("DefaultChatSystemChatEvents")
+                :FindFirstChild("SayMessageRequest"):FireServer(message, "All")
+        end
+    end)
+end
+
+local function sendRandomTaunt()
+    local availableTaunts = {}
+    for _, taunt in ipairs(TAUNTS) do table.insert(availableTaunts, taunt) end
+    if getAltHealth() > 80 then table.insert(availableTaunts, "not even close") end
+    if #availableTaunts > 0 then
+        sendChat(availableTaunts[math.random(1, #availableTaunts)])
+    end
+end
+
+local function scheduleTaunt(distanceWhenDied)
+    if tauntScheduled then return end
+    
+    -- Only taunt if we were within range when target died
+    if distanceWhenDied and distanceWhenDied > CONFIG.TAUNT_RANGE then
+        return  -- Too far away, don't taunt
+    end
+    
+    tauntScheduled = true
+    local delay = CONFIG.TAUNT_MIN_DELAY + math.random() * (CONFIG.TAUNT_MAX_DELAY - CONFIG.TAUNT_MIN_DELAY)
+    task.spawn(function()
+        task.wait(delay)
+        if targetWasDead and not hasSentTaunt then
+            sendRandomTaunt()
+            hasSentTaunt = true
+        end
+        tauntScheduled = false
+    end)
+end
+
+-- =====================================================
+-- FLIGHT CONTROL
+-- =====================================================
+
+local function hasFlight()
+    local chars = workspace:FindFirstChild("Characters")
+    if not chars then return false end
+    local myChar = chars:FindFirstChild(player.Name)
+    if not myChar then return false end
+    local root = myChar:FindFirstChild("HumanoidRootPart")
+    return root and root:FindFirstChild("TelekinesisFlight") ~= nil
+end
+
+local lastFlightToggle = 0
+
+local function toggleFlight()
+    local now = tick()
+    if now - lastFlightToggle < CONFIG.FLIGHT_TOGGLE_COOLDOWN then return end
+    lastFlightToggle = now
+    task.spawn(function()
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+            task.wait(0.05)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+        end)
+    end)
+end
+
+local function manageFlightStamina()
+    local stamina = getStamina()
+    if not stamina then return end
+    local effectiveMin = getEffectiveStaminaMin()
+    local effectiveRecharge = getEffectiveStaminaRecharge()
+    local currentlyFlying = hasFlight()
+    if stamina <= effectiveMin and currentlyFlying then
+        toggleFlight()
+        flightDisabledForStamina = true
+    elseif stamina >= effectiveRecharge and flightDisabledForStamina and not currentlyFlying then
+        toggleFlight()
+        flightDisabledForStamina = false
+    end
+end
+
+local function ensureFlight()
+    if flightDisabledForStamina then return false end
+    local stamina = getStamina()
+    if stamina and stamina <= getEffectiveStaminaMin() then return false end
+    if not hasFlight() then toggleFlight() end
+    return hasFlight()
+end
+
+-- =====================================================
+-- MOVEMENT KEY PULSING
+-- =====================================================
+
+local activeKeyThreads = {}
+local keyHeldState = {}
+
+local function stopAllMovementKeys()
+    for keyName, _ in pairs(activeKeyThreads) do
+        activeKeyThreads[keyName] = nil
+    end
+    local movementKeys = {Enum.KeyCode.W, Enum.KeyCode.S, Enum.KeyCode.A, Enum.KeyCode.D, Enum.KeyCode.Space}
+    for _, keyCode in ipairs(movementKeys) do
+        if keyHeldState[keyCode] then
+            pcall(function() VirtualInputManager:SendKeyEvent(false, keyCode, false, game) end)
+            keyHeldState[keyCode] = false
+        end
+    end
+end
+
+local function pulseMovementKey(keyCode)
+    local keyName = tostring(keyCode)
+    if activeKeyThreads[keyName] then return end
+    activeKeyThreads[keyName] = true
+    task.spawn(function()
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
+            keyHeldState[keyCode] = true
+        end)
+        local startTime = tick()
+        while activeKeyThreads[keyName] and (tick() - startTime) < CONFIG.KEY_PULSE_DURATION do
+            task.wait(0.1)
+        end
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+            keyHeldState[keyCode] = false
+        end)
+        activeKeyThreads[keyName] = nil
+    end)
+end
+
+local function stopMovementKey(keyCode)
+    local keyName = tostring(keyCode)
+    activeKeyThreads[keyName] = nil
+    if keyHeldState[keyCode] then
+        pcall(function() VirtualInputManager:SendKeyEvent(false, keyCode, false, game) end)
+        keyHeldState[keyCode] = false
+    end
+end
+
+local function holdKey(keyCode)
+    pcall(function() VirtualInputManager:SendKeyEvent(true, keyCode, false, game) end)
+end
+
+local function releaseKey(keyCode)
+    pcall(function() VirtualInputManager:SendKeyEvent(false, keyCode, false, game) end)
+end
+
+local function doRandomWalk()
+    local currentTime = tick()
+    if not randomWalkDirection or currentTime - lastRandomWalkTime > (1 + math.random()) then
+        lastRandomWalkTime = currentTime
+        local angle = math.random() * math.pi * 2
+        randomWalkDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
+        if math.random() > 0.5 then
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+                task.wait(0.1)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+            end)
+        end
+    end
+    if randomWalkDirection then
+        local myRoot = getRoot(player)
+        if myRoot then
+            Camera.CFrame = CFrame.lookAt(myRoot.Position, myRoot.Position + randomWalkDirection * 20)
+            pulseMovementKey(Enum.KeyCode.W)
+        end
+    end
+end
+
+-- Random jump while walking (to get over hills/obstacles)
+local function tryRandomJump()
+    local currentTime = tick()
+    if currentTime - lastJumpTime < CONFIG.JUMP_INTERVAL then
+        return false
+    end
+    
+    -- Only jump if not flying
+    if hasFlight() then
+        return false
+    end
+    
+    -- Random chance to jump
+    if math.random() < CONFIG.JUMP_CHANCE then
+        lastJumpTime = currentTime
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        end)
+        return true
+    end
+    
+    return false
+end
+
+-- Combat jump (to throw off enemy aim)
+local function tryCombatJump()
+    local currentTime = tick()
+    if currentTime - lastCombatJumpTime < CONFIG.JUMP_INTERVAL then
+        return false
+    end
+    
+    -- Only jump if not flying
+    if hasFlight() then
+        return false
+    end
+    
+    -- Higher chance during combat
+    if math.random() < CONFIG.COMBAT_JUMP_CHANCE then
+        lastCombatJumpTime = currentTime
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        end)
+        return true
+    end
+    
+    return false
+end
+
+local function tryResurface()
+    local myRoot = getRoot(player)
+    if not myRoot then return end
+    Camera.CameraType = Enum.CameraType.Scriptable
+    Camera.CFrame = CFrame.lookAt(myRoot.Position, myRoot.Position + Vector3.new(0, 20, 0))
+    local stamina = getStamina()
+    local canFly = hasFlight() or (stamina and stamina >= getEffectiveStaminaMin())
+    if canFly and not isUnderwater then
+        ensureFlight()
+        pulseMovementKey(Enum.KeyCode.W)
+    else
+        pulseMovementKey(Enum.KeyCode.W)
+        pulseMovementKey(Enum.KeyCode.Space)
+    end
+end
+
+-- =====================================================
+-- MOUSE HELPERS
+-- =====================================================
+
+local function getScreenCenter()
+    local viewportSize = Camera.ViewportSize
+    return viewportSize.X / 2, viewportSize.Y / 2
+end
+
+local function moveMouseToCenter()
+    pcall(function()
+        local centerX, centerY = getScreenCenter()
+        VirtualInputManager:SendMouseMoveEvent(centerX, centerY, game)
+    end)
+end
+
+local function sendMouseClick()
+    spawn(function()
+        pcall(function()
+            local centerX, centerY = getScreenCenter()
+            VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, game, 0)
+            wait(0.05)
+            VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, game, 0)
+        end)
+    end)
+end
+
+-- =====================================================
+-- STUCK DETECTION
+-- =====================================================
+
+local function isVelocityStuck(velocity)
+    -- Only check horizontal velocity (X and Z)
+    -- Jumping changes Y velocity but doesn't mean we're unstuck horizontally
+    return math.abs(velocity.X) < CONFIG.STUCK_VELOCITY_THRESHOLD 
+       and math.abs(velocity.Z) < CONFIG.STUCK_VELOCITY_THRESHOLD
+end
+
+local function scanForAlternativePath(myPos, targetPos)
+    local toTarget = (targetPos - myPos).Unit
+    local numPoints = CONFIG.UNSTUCK_SPHERE_POINTS
+    local goldenRatio = (1 + math.sqrt(5)) / 2
+    
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {
+        workspace:FindFirstChild("Characters"),
+        player.Character,
+        targetPlayer and targetPlayer.Character
+    }
+    
+    local bestDirection = nil
+    local bestScore = -math.huge
+    
+    for i = 0, numPoints - 1 do
+        local theta = 2 * math.pi * i / goldenRatio
+        local phi = math.acos(1 - 2 * (i + 0.5) / numPoints)
+        local x = math.sin(phi) * math.cos(theta)
+        local y = math.cos(phi)
+        local z = math.sin(phi) * math.sin(theta)
+        local dir = Vector3.new(x, y, z)
+        
+        local result = workspace:Raycast(myPos, dir * CONFIG.UNSTUCK_SCAN_DISTANCE, raycastParams)
+        local clearDistance = result and (result.Position - myPos).Magnitude or CONFIG.UNSTUCK_SCAN_DISTANCE
+        local dotToTarget = dir:Dot(toTarget)
+        local score = clearDistance + (dotToTarget * 15)
+        if dir.Y > 0.3 then score = score + 20 end
+        if dotToTarget < -0.8 then score = score - 10 end
+        if clearDistance > 15 and score > bestScore then
+            bestScore = score
+            bestDirection = dir
+        end
+    end
+    
+    return bestDirection or Vector3.new(0, 1, 0)
+end
+
+local function startUnsticking(myPos, targetPos)
+    isUnsticking = true
+    unstickDirection = scanForAlternativePath(myPos, targetPos)
+    unstickEndTime = tick() + CONFIG.UNSTUCK_DURATION
+    stopAllMovementKeys()
+end
+
+local function updateStuckDetection(myPos, deltaTime)
+    local currentTime = tick()
+    if lastPosition and lastPositionTime > 0 then
+        local timeDelta = currentTime - lastPositionTime
+        if timeDelta > 1 then
+            stuckTimer = 0
+            lastPosition = myPos
+            lastPositionTime = currentTime
+            return 0
+        end
+        if timeDelta > 0 then
+            local velocity = (myPos - lastPosition) / timeDelta
+            if isVelocityStuck(velocity) then
+                stuckTimer = stuckTimer + deltaTime
+            else
+                stuckTimer = 0
+            end
+        end
+    end
+    lastPosition = myPos
+    lastPositionTime = currentTime
+    return stuckTimer
+end
+
+local function resetStuckDetection()
+    stuckTimer = 0
+    lastPosition = nil
+    lastPositionTime = 0
+    isUnsticking = false
+    unstickDirection = nil
+    unstickEndTime = 0
+end
+
+-- =====================================================
+-- LINE OF SIGHT
+-- =====================================================
+
+local function hasLineOfSight(fromPos, toPos)
+    if not fromPos or not toPos then return false end
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {
+        workspace:FindFirstChild("Characters"),
+        player.Character,
+        targetPlayer and targetPlayer.Character
+    }
+    local result = workspace:Raycast(fromPos, toPos - fromPos, raycastParams)
+    if not result then return true end
+    return (result.Position - toPos).Magnitude < 5
+end
+
+local function hasCompleteLineOfSight(myRoot, targetRoot)
+    if not myRoot or not targetRoot then return false end
+    local myPos = myRoot.Position
+    local targetPos = targetRoot.Position
+    local direction = (targetPos - myPos).Unit
+    local distance = (targetPos - myPos).Magnitude
+    
+    local upVector = Vector3.new(0, 1, 0)
+    local rightVector = direction:Cross(upVector)
+    if rightVector.Magnitude < 0.1 then rightVector = direction:Cross(Vector3.new(1, 0, 0)) end
+    rightVector = rightVector.Unit
+    local upPerpVector = rightVector:Cross(direction).Unit
+    
+    local spreadRadius = 3
+    local coneRays = {targetPos}
+    local numRingRays = CONFIG.LINE_OF_SIGHT_CHECKS - 1
+    for i = 1, numRingRays do
+        local angle = (i / numRingRays) * math.pi * 2
+        local offset = rightVector * math.cos(angle) * spreadRadius + upPerpVector * math.sin(angle) * spreadRadius
+        table.insert(coneRays, targetPos + offset)
+    end
+    
+    local visibleRays = 0
+    for _, endPoint in ipairs(coneRays) do
+        if hasLineOfSight(myPos, endPoint) then visibleRays = visibleRays + 1 end
+    end
+    return visibleRays >= math.ceil(#coneRays * 0.5)
+end
+
+-- =====================================================
+-- VISUAL INDICATORS
+-- =====================================================
+
+local function createTargetIndicator()
+    if targetIndicator then targetIndicator:Destroy(); targetIndicator = nil end
+    if targetBillboard then targetBillboard:Destroy(); targetBillboard = nil end
+    if not targetPlayer then return end
+    
+    local targetChar = getChar(targetPlayer)
+    local targetRoot = getRoot(targetPlayer)
+    if not targetChar or not targetRoot then return end
+    
+    local selectionBox = Instance.new("SelectionBox")
+    selectionBox.Name = "TargetIndicator"
+    selectionBox.Adornee = targetChar
+    selectionBox.Color3 = Color3.fromRGB(255, 0, 0)
+    selectionBox.LineThickness = 0.1
+    selectionBox.Transparency = 0.3
+    selectionBox.Parent = targetChar
+    targetIndicator = selectionBox
+    
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "TargetBillboard"
+    billboard.Adornee = targetRoot
+    billboard.Size = UDim2.new(0, 200, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 5, 0)
+    billboard.AlwaysOnTop = true
+    
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundTransparency = 0.5
+    frame.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+    frame.BorderSizePixel = 0
+    frame.Parent = billboard
+    
+    local text = Instance.new("TextLabel")
+    text.Size = UDim2.new(1, 0, 1, 0)
+    text.BackgroundTransparency = 1
+    text.Text = "🎯 TARGET"
+    text.TextColor3 = Color3.fromRGB(255, 255, 255)
+    text.TextScaled = true
+    text.Font = Enum.Font.SourceSansBold
+    text.Parent = frame
+    
+    billboard.Parent = targetRoot
+    targetBillboard = billboard
+end
+
+local function updateTargetIndicator(status)
+    if not targetBillboard then return end
+    local frame = targetBillboard:FindFirstChild("Frame")
+    if not frame then return end
+    local text = frame:FindFirstChild("TextLabel")
+    if not text then return end
+    
+    local statusConfig = {
+        attacking = {Color3.fromRGB(0, 255, 0), "⚔️ ATTACKING"},
+        invisible = {Color3.fromRGB(128, 0, 255), "👻 INVISIBLE"},
+        dead = {Color3.fromRGB(128, 128, 128), "💀 DEAD"},
+        blocked = {Color3.fromRGB(255, 128, 0), "🚫 BLOCKED"},
+        normal = {Color3.fromRGB(255, 0, 0), "🎯 TARGET"}
+    }
+    local config = statusConfig[status] or statusConfig.normal
+    frame.BackgroundColor3 = config[1]
+    text.Text = config[2]
+    if targetIndicator then targetIndicator.Color3 = config[1] end
+end
+
+local function removeTargetIndicator()
+    if targetIndicator then targetIndicator:Destroy(); targetIndicator = nil end
+    if targetBillboard then targetBillboard:Destroy(); targetBillboard = nil end
+end
+
+-- =====================================================
+-- DEBUG GUI
+-- =====================================================
+
+local function createDebugGui()
+    local playerGui = player:WaitForChild("PlayerGui")
+    if debugGui then debugGui:Destroy() end
+    
+    debugGui = Instance.new("ScreenGui")
+    debugGui.Name = "AltFollowDebug"
+    debugGui.ResetOnSpawn = false
+    
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 400, 0, 320)
+    frame.Position = UDim2.new(0, 10, 0, 10)
+    frame.BackgroundColor3 = Color3.new(0, 0, 0)
+    frame.BackgroundTransparency = 0.3
+    frame.BorderSizePixel = 2
+    frame.BorderColor3 = Color3.new(0, 1, 1)
+    frame.Parent = debugGui
+    
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Name = "DebugText"
+    textLabel.Size = UDim2.new(1, -10, 1, -10)
+    textLabel.Position = UDim2.new(0, 5, 0, 5)
+    textLabel.BackgroundTransparency = 1
+    textLabel.TextColor3 = Color3.new(1, 1, 1)
+    textLabel.TextXAlignment = Enum.TextXAlignment.Left
+    textLabel.TextYAlignment = Enum.TextYAlignment.Top
+    textLabel.TextSize = 12
+    textLabel.Font = Enum.Font.Code
+    textLabel.Text = "Debug Info"
+    textLabel.Parent = frame
+    
+    debugGui.Parent = playerGui
+end
+
+local function updateDebug(info)
+    if debugGui then
+        local textLabel = debugGui:FindFirstChild("DebugText", true)
+        if textLabel then textLabel.Text = info end
+    end
+end
+
+-- =====================================================
+-- SPECTATE CONTROL
+-- =====================================================
+
+local function startSpectating()
+    if spectating then return end
+    if not canEnterCombatMode() then return end
+    spectating = true
+    Camera.CameraType = Enum.CameraType.Scriptable
+    UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+end
+
+local function stopSpectating()
+    if not spectating then return end
+    spectating = false
+    Camera.CameraType = Enum.CameraType.Custom
+    local hum = getHumanoid(player)
+    if hum then Camera.CameraSubject = hum end
+    UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+end
+
+local function updateSpectateCamera()
+    if not spectating or not targetPlayer then return end
+    local targetRoot = getRoot(targetPlayer)
+    if targetRoot then
+        local targetPos = targetRoot.Position
+        Camera.CFrame = CFrame.lookAt(targetPos + Vector3.new(0, 5, 10), targetPos)
+    end
+end
+
+local function moveWhileSpectating(moveToward)
+    local myRoot = getRoot(player)
+    local targetRoot = getRoot(targetPlayer)
+    if not myRoot or not targetRoot then return end
+    
+    local myPos = myRoot.Position
+    local targetPos = targetRoot.Position
+    local camCFrame = Camera.CFrame
+    
+    local altInCamSpace = camCFrame:PointToObjectSpace(myPos)
+    local targetInCamSpace = camCFrame:PointToObjectSpace(targetPos)
+    local dirInCamSpace = (targetInCamSpace - altInCamSpace).Unit
+    if not moveToward then dirInCamSpace = -dirInCamSpace end
+    
+    stopAllMovementKeys()
+    if dirInCamSpace.Z < -0.2 then pulseMovementKey(Enum.KeyCode.W) end
+    if dirInCamSpace.Z > 0.2 then pulseMovementKey(Enum.KeyCode.S) end
+    if dirInCamSpace.X < -0.2 then pulseMovementKey(Enum.KeyCode.A) end
+    if dirInCamSpace.X > 0.2 then pulseMovementKey(Enum.KeyCode.D) end
+end
+
+local cameraUpdateConnection = nil
+
+local function startCameraUpdate()
+    if cameraUpdateConnection then return end
+    cameraUpdateConnection = RunService.RenderStepped:Connect(function()
+        if spectating and targetPlayer and not altIsDead then
+            updateSpectateCamera()
+        end
+    end)
+end
+
+local function stopCameraUpdate()
+    if cameraUpdateConnection then
+        cameraUpdateConnection:Disconnect()
+        cameraUpdateConnection = nil
+    end
+end
+
+-- =====================================================
+-- SMOOTH VERTICAL FLIGHT LOGIC (NEW)
+-- =====================================================
+
+-- Determine if we should continue current vertical direction (ignore small changes)
+local function shouldContinueVerticalDirection(currentYDiff)
+    local now = tick()
+    
+    -- If height difference is very small, likely jumping/maneuvering - continue current direction
+    if math.abs(currentYDiff) < CONFIG.SMALL_HEIGHT_CHANGE then
+        if now - verticalDirectionStartTime < CONFIG.VERTICAL_DIRECTION_HOLD_TIME then
+            return lastVerticalDirection
+        end
+    end
+    
+    -- Determine new direction
+    local newDirection = 0
+    if currentYDiff > CONFIG.SMALL_HEIGHT_CHANGE then
+        newDirection = 1  -- Need to go UP
+    elseif currentYDiff < -CONFIG.SMALL_HEIGHT_CHANGE then
+        newDirection = -1  -- Need to go DOWN
+    end
+    
+    -- If direction changed, reset timer
+    if newDirection ~= lastVerticalDirection then
+        lastVerticalDirection = newDirection
+        verticalDirectionStartTime = now
+    end
+    
+    return newDirection
+end
+
+-- Calculate angled flight direction (not pure horizontal, slight vertical angle)
+local function getAngledFlightDirection(myPos, targetPos)
+    local fullVector = targetPos - myPos
+    local horizontalDir = Vector3.new(fullVector.X, 0, fullVector.Z)
+    local horizontalDist = horizontalDir.Magnitude
+    local verticalDiff = targetPos.Y - myPos.Y  -- Positive = target above
+    local absVerticalDiff = math.abs(verticalDiff)
+    
+    -- Ensure we have a valid horizontal direction (fallback if directly above/below)
+    if horizontalDist < 1 then
+        horizontalDir = Vector3.new(1, 0, 0)
+        horizontalDist = 1
+    end
+    local horizontalUnit = horizontalDir.Unit
+    
+    -- Use vertical direction persistence (ignore target jumping)
+    local persistedDirection = shouldContinueVerticalDirection(verticalDiff)
+    
+    -- If target is jumping/small movement AND we have a persisted direction, use it
+    if absVerticalDiff < CONFIG.SMALL_HEIGHT_CHANGE and persistedDirection ~= 0 then
+        -- Continue previous vertical direction with angled flight
+        local verticalRatio = persistedDirection * CONFIG.ANGLED_FLIGHT_RATIO
+        if persistedDirection < 0 and isTerrainBelow() then
+            verticalRatio = 0
+        end
+        local angledDirection = (horizontalUnit + Vector3.new(0, verticalRatio, 0)).Unit
+        return angledDirection, "ANGLED_PERSIST"
+    end
+    
+    -- If vertical diff is small and no persisted direction, fly horizontal
+    if absVerticalDiff < CONFIG.SMALL_HEIGHT_CHANGE then
+        return horizontalUnit, "HORIZONTAL"
+    end
+    
+    -- If vertical separation exceeds max (80 studs), prioritize vertical movement
+    if absVerticalDiff > CONFIG.MAX_VERTICAL_SEPARATION then
+        if verticalDiff > 0 then
+            return (horizontalUnit * 0.4 + Vector3.new(0, 0.9, 0)).Unit, "STEEP_UP"
+        else
+            if isTerrainBelow() then
+                return horizontalUnit, "TERRAIN_BLOCK"
+            end
+            return (horizontalUnit * 0.4 + Vector3.new(0, -0.9, 0)).Unit, "STEEP_DOWN"
+        end
+    end
+    
+    -- If horizontal distance is small (< 100 studs) but vertical > 10, go steep
+    if horizontalDist < CONFIG.HORIZONTAL_TOO_SMALL and absVerticalDiff > 10 then
+        if verticalDiff > 0 then
+            return (horizontalUnit * 0.3 + Vector3.new(0, 0.95, 0)).Unit, "VERTICAL_UP"
+        else
+            if isTerrainBelow() then
+                return horizontalUnit, "TERRAIN_BLOCK"
+            end
+            return (horizontalUnit * 0.3 + Vector3.new(0, -0.95, 0)).Unit, "VERTICAL_DOWN"
+        end
+    end
+    
+    -- Normal case: fly with angle toward target (horizontal >= 100 studs, vertical > 8 studs)
+    -- ANGLED_FLIGHT_RATIO of 0.5 means for every 1 unit horizontal, add 0.5 vertical
+    -- This creates roughly a 26 degree angle
+    local verticalRatio = CONFIG.ANGLED_FLIGHT_RATIO
+    if verticalDiff < 0 then
+        -- Going down - check terrain
+        if isTerrainBelow() then
+            verticalRatio = 0
+        else
+            verticalRatio = -CONFIG.ANGLED_FLIGHT_RATIO
+        end
+    end
+    
+    -- Create angled direction: horizontal unit + vertical component
+    local angledDirection = (horizontalUnit + Vector3.new(0, verticalRatio, 0)).Unit
+    return angledDirection, "ANGLED"
+end
+
+-- Smart camera positioning using angled flight
+local function pointCameraForMovement(myPos, targetPos)
+    local direction, flightType = getAngledFlightDirection(myPos, targetPos)
+    local lookTarget = myPos + direction * 50
+    
+    -- Use CFrame.lookAt with explicit up vector to prevent flipping
+    -- When looking down, the default up vector can cause issues
+    local upVector = Vector3.new(0, 1, 0)
+    
+    -- If looking nearly straight down or up, adjust up vector
+    if math.abs(direction.Y) > 0.9 then
+        upVector = Vector3.new(0, 0, -1)  -- Use Z as up when looking vertically
+    end
+    
+    Camera.CFrame = CFrame.lookAt(myPos, lookTarget, upVector)
+    return flightType
+end
+
+local function pointCameraAway(myPos, targetPos)
+    local yDiff = targetPos.Y - myPos.Y
+    local horizontalAway = (myPos - targetPos)
+    horizontalAway = Vector3.new(horizontalAway.X, 0, horizontalAway.Z)
+    
+    -- Ensure valid horizontal direction
+    if horizontalAway.Magnitude < 1 then
+        horizontalAway = Vector3.new(1, 0, 0)
+    end
+    local horizontalUnit = horizontalAway.Unit
+    
+    if math.abs(yDiff) > CONFIG.VERTICAL_THRESHOLD then
+        if yDiff > 0 then
+            -- Target above, back away by going down (but with horizontal component)
+            if isTerrainBelow() then
+                Camera.CFrame = CFrame.lookAt(myPos, myPos + horizontalUnit * 50)
+                return "TERRAIN_BLOCK_AWAY"
+            end
+            -- Go down and away - keep horizontal component to prevent flip
+            local downAway = (horizontalUnit * 0.3 + Vector3.new(0, -0.95, 0)).Unit
+            Camera.CFrame = CFrame.lookAt(myPos, myPos + downAway * 50, Vector3.new(0, 0, -1))
+        else
+            -- Target below, back away by going up (with horizontal component)
+            local upAway = (horizontalUnit * 0.3 + Vector3.new(0, 0.95, 0)).Unit
+            Camera.CFrame = CFrame.lookAt(myPos, myPos + upAway * 50, Vector3.new(0, 0, -1))
+        end
+        return "VERTICAL_AWAY"
+    end
+    
+    -- Horizontal backing away
+    Camera.CFrame = CFrame.lookAt(myPos, myPos + horizontalUnit * 50)
+    return "HORIZONTAL_AWAY"
+end
+
+-- =====================================================
+-- COMBAT SYSTEM
+-- =====================================================
+
+local lastCanAttackCheck = 0
+local lastCanAttackResult = false
+
+local function canAttackNow()
+    local now = tick()
+    if now - lastCanAttackCheck < 0.2 then return lastCanAttackResult end
+    lastCanAttackCheck = now
+    
+    if now - lastQClickTime < CONFIG.Q_CLICK_COOLDOWN then lastCanAttackResult = false; return false end
+    if isAttacking then lastCanAttackResult = false; return false end
+    
+    local targetPos = getTargetPosition()
+    if targetPos and isTargetUnderMap(targetPos) then lastCanAttackResult = false; return false end
+    
+    local stamina = getStamina()
+    if not stamina or stamina < getEffectiveStaminaMin() then lastCanAttackResult = false; return false end
+    if not spectating then lastCanAttackResult = false; return false end
+    if targetWasDead or targetWasInvisible then lastCanAttackResult = false; return false end
+    
+    lastCanAttackResult = true
+    return true
+end
+
+local function isInAttackRange(totalDist)
+    return totalDist >= CONFIG.OPTIMAL_MIN and totalDist <= CONFIG.OPTIMAL_MAX
+end
+
+local function checkDamageTaken()
+    local currentHealth = getAltHealth()
+    local damageTaken = lastKnownHealth - currentHealth
+    if currentHealth < lastKnownHealth then
+        lastKnownHealth = currentHealth
+    elseif currentHealth > lastKnownHealth then
+        lastKnownHealth = currentHealth
+        return 0
+    end
+    return damageTaken
+end
+
+local function resetDamageTracking()
+    lastKnownHealth = getAltHealth()
+end
+
+local function checkEmergencyDefense(myPos, targetPos)
+    if not targetPlayer or targetWasDead or targetWasInvisible then return false end
+    local damageTaken = checkDamageTaken()
+    if damageTaken < damageThreshold then return false end
+    local totalDist = (targetPos - myPos).Magnitude
+    if not isInAttackRange(totalDist) then return false end
+    if tick() - lastQClickTime < CONFIG.Q_CLICK_COOLDOWN then return false end
+    if isAttacking then return false end
+    local stamina = getStamina()
+    if not stamina or stamina < getEffectiveStaminaMin() then return false end
+    local myRoot = getRoot(player)
+    local targetRoot = getRoot(targetPlayer)
+    if not myRoot or not targetRoot then return false end
+    if not hasCompleteLineOfSight(myRoot, targetRoot) then return false end
+    return true
+end
+
+local function performEmergencyDefense(myPos, targetPos, interruptedTask)
+    emergencyDefenseActive = true
+    preEmergencyTask = interruptedTask
+    if not spectating then startSpectating() end
+    isAttacking = true
+    updateTargetIndicator("attacking")
+    
+    spawn(function()
+        moveMouseToCenter()
+        wait(0.03)
+        holdKey(Enum.KeyCode.Q)
+        wait(0.15)
+        sendMouseClick()
+        wait(0.2)
+        releaseKey(Enum.KeyCode.Q)
+        isAttacking = false
+        lastQClickTime = tick()
+        emergencyDefenseActive = false
+        preEmergencyTask = nil
+        if currentMode == "ATTACK" and not targetWasInvisible then
+            updateTargetIndicator("normal")
+        end
+    end)
+    return true
+end
+
+local function performQClickAttack()
+    local currentTime = tick()
+    if currentTime - lastQClickTime < CONFIG.Q_CLICK_COOLDOWN then return false end
+    if isAttacking then return false end
+    
+    local myRoot = getRoot(player)
+    local targetRoot = getRoot(targetPlayer)
+    if not myRoot or not targetRoot then return false end
+    
+    local myPos = myRoot.Position
+    local targetPos = targetRoot.Position
+    
+    if isTargetUnderMap(targetPos) then updateTargetIndicator("blocked"); return false end
+    
+    if cachedTargetInWater then
+        local validPos = isValidUnderwaterAttackPosition(myPos, targetPos)
+        if not validPos then return false end
+    end
+    
+    local hasLOS = hasCompleteLineOfSight(myRoot, targetRoot)
+    if not hasLOS and isInRiverBounds(targetPos) then
+        if canGrabRiverTarget(myPos, targetPos) then hasLOS = true end
+    end
+    if not hasLOS then updateTargetIndicator("blocked"); return false end
+    if not spectating then return false end
+    
+    isAttacking = true
+    updateTargetIndicator("attacking")
+    
+    spawn(function()
+        moveMouseToCenter()
+        wait(0.05)
+        holdKey(Enum.KeyCode.W)
+        holdKey(Enum.KeyCode.Q)
+        wait(0.2)
+        sendMouseClick()
+        wait(0.3)
+        releaseKey(Enum.KeyCode.Q)
+        releaseKey(Enum.KeyCode.W)
+        isAttacking = false
+        justAttacked = true
+        lastQClickTime = tick()
+        if currentMode == "ATTACK" and not targetWasInvisible then
+            updateTargetIndicator("normal")
+        end
+    end)
+    return true
+end
+
+-- =====================================================
+-- MAIN MOVEMENT CALCULATION
+-- =====================================================
+
+local function calculateMovementAndMode(myPos, targetPos)
+    local fullVector = targetPos - myPos
+    local horizontalVector = Vector3.new(fullVector.X, 0, fullVector.Z)
+    local horizontalDistance = horizontalVector.Magnitude
+    local verticalDiff = fullVector.Y
+    local totalDistance = fullVector.Magnitude
+    
+    local newMode = currentMode
+    if flightDisabledForStamina then
+        newMode = "STAMINA_REGEN"
+    elseif totalDistance > CONFIG.COMBAT_ZONE then
+        newMode = "TRAVEL"
+    elseif totalDistance > CONFIG.OPTIMAL_MAX then
+        newMode = "APPROACH"
+    elseif totalDistance >= CONFIG.OPTIMAL_MIN and totalDistance <= CONFIG.OPTIMAL_MAX then
+        newMode = "ATTACK"
+    else
+        newMode = "TOO_CLOSE"
+    end
+    
+    return newMode, horizontalDistance, verticalDiff, horizontalVector, totalDistance
+end
+
+-- =====================================================
+-- MAIN FOLLOW LOOP
+-- =====================================================
+
+local movementLoop = nil
+
+local function startMovementLoop()
+    movementLoop = RunService.Heartbeat:Connect(function(deltaTime)
+        if not following or not targetPlayer then return end
+        if altIsDead then return end
+        
+        local myRoot = getRoot(player)
+        local targetPos = getTargetPosition()
+        if not myRoot or not targetPos then return end
+        local myPos = myRoot.Position
+        
+        -- Tab-out detection
+        local currentFrameTime = tick()
+        if lastFrameTime > 0 then
+            local frameGap = currentFrameTime - lastFrameTime
+            if frameGap > 0.5 then
+                for keyName in pairs(activeKeyThreads) do activeKeyThreads[keyName] = nil end
+                movementPulseTimer = CONFIG.MOVEMENT_PULSE_RATE
+            end
+        end
+        lastFrameTime = currentFrameTime
+        
+        manageFlightStamina()
+        
+        -- Underwater detection
+        local currentTime = tick()
+        if currentTime - lastUnderwaterCheck > 0.25 then
+            lastUnderwaterCheck = currentTime
+            local wasUnderwater = isUnderwater
+            isUnderwater = checkUnderwater()
+            cachedTargetInWater = isTargetUnderwater()
+            if not isUnderwater and wasUnderwater then
+                airRemaining = CONFIG.UNDERWATER_MAX_TIME
+                resurfaceStarted = false
+            end
+        end
+        
+        if isUnderwater then
+            airRemaining = airRemaining - deltaTime
+        else
+            airRemaining = CONFIG.UNDERWATER_MAX_TIME
+            resurfaceStarted = false
+        end
+        
+        if spectating and not canEnterCombatMode() then stopSpectating() end
+        
+        -- Forced resurface
+        if isUnderwater and airRemaining <= 0 then
+            if not resurfaceStarted then
+                resurfaceStarted = true
+                resetDamageTracking()
+            end
+            if checkEmergencyDefense(myPos, targetPos) then
+                performEmergencyDefense(myPos, targetPos, "RESURFACE")
+            else
+                if spectating then stopSpectating() end
+            end
+            if not isAttacking then tryResurface() end
+            movementPulseTimer = movementPulseTimer + deltaTime
+            return
+        end
+        
+        -- Target underwater handling
+        if cachedTargetInWater and not targetWasDead then
+            if not isUnderwater then
+                if spectating then stopSpectating() end
+                ensureFlight()
+                Camera.CameraType = Enum.CameraType.Scriptable
+                Camera.CFrame = CFrame.lookAt(myPos, targetPos)
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    pulseMovementKey(Enum.KeyCode.W)
+                end
+                movementPulseTimer = movementPulseTimer + deltaTime
+                return
+            else
+                local validPos = isValidUnderwaterAttackPosition(myPos, targetPos)
+                if not validPos then
+                    if spectating then stopSpectating() end
+                    local repoDir = getUnderwaterRepositionDirection(myPos, targetPos)
+                    Camera.CameraType = Enum.CameraType.Scriptable
+                    Camera.CFrame = CFrame.lookAt(myPos, myPos + repoDir * 20)
+                    if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                        movementPulseTimer = 0
+                        pulseMovementKey(Enum.KeyCode.W)
+                    end
+                    movementPulseTimer = movementPulseTimer + deltaTime
+                end
+            end
+        end
+        
+        -- Target status check
+        if currentTime - lastTargetCheck > CONFIG.TARGET_CHECK_RATE then
+            lastTargetCheck = currentTime
+            local alive = isTargetAlive()
+            local invisible = isTargetInvisible()
+            
+            if not alive and not targetWasDead then
+                targetWasDead = true
+                stopSpectating()
+                updateTargetIndicator("dead")
+                hasSentTaunt = false
+                -- Pass current distance to scheduleTaunt
+                local deathDistance = targetPos and (targetPos - myPos).Magnitude or 999
+                scheduleTaunt(deathDistance)
+            elseif alive and targetWasDead then
+                targetWasDead = false
+                stoppedFlightForDeath = false
+                hasSentTaunt = false
+                tauntScheduled = false
+                createTargetIndicator()
+            end
+            
+            if invisible and not targetWasInvisible then
+                targetWasInvisible = true
+                updateTargetIndicator("invisible")
+            elseif not invisible and targetWasInvisible then
+                targetWasInvisible = false
+                updateTargetIndicator("normal")
+            end
+        end
+        
+        -- Under map
+        if isTargetUnderMap(targetPos) then
+            currentMode = "WAITING"
+            if spectating then stopSpectating() end
+            doRandomWalk()
+            return
+        end
+        
+        -- Dead
+        if targetWasDead then
+            currentMode = "WAITING"
+            if not stoppedFlightForDeath and hasFlight() then
+                toggleFlight()
+                stoppedFlightForDeath = true
+            end
+            if isUnderwater and airRemaining <= 0 then
+                tryResurface()
+            else
+                doRandomWalk()
+            end
+            return
+        end
+        
+        -- Invisible - retreat
+        if targetWasInvisible then
+            currentMode = "RETREAT"
+            if spectating then stopSpectating() end
+            ensureFlight()
+            Camera.CameraType = Enum.CameraType.Scriptable
+            local awayDir = (myPos - targetPos)
+            if awayDir.Magnitude > 0.1 then awayDir = awayDir.Unit else awayDir = Vector3.new(1, 0, 0) end
+            Camera.CFrame = CFrame.lookAt(myPos, myPos + awayDir * 50)
+            if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                movementPulseTimer = 0
+                pulseMovementKey(Enum.KeyCode.W)
+            end
+            movementPulseTimer = movementPulseTimer + deltaTime
+            return
+        end
+        
+        local newMode, hDist, vDiff, hVector, totalDist = calculateMovementAndMode(myPos, targetPos)
+        
+        -- Stuck detection
+        local currentStuckTime = updateStuckDetection(myPos, deltaTime)
+        if not isUnsticking and currentStuckTime >= CONFIG.STUCK_TIME_THRESHOLD then
+            startUnsticking(myPos, targetPos)
+        end
+        if isUnsticking and tick() >= unstickEndTime then
+            isUnsticking = false
+            unstickDirection = nil
+            stuckTimer = 0
+        end
+        
+        -- Attack priority
+        local attackPriorityTriggered = false
+        if isInAttackRange(totalDist) and canAttackNow() then
+            attackPriorityTriggered = true
+            if not spectating then startSpectating() end
+            performQClickAttack()
+        end
+        
+        -- Unstick mode
+        if isUnsticking and unstickDirection and not attackPriorityTriggered then
+            if spectating then stopSpectating() end
+            ensureFlight()
+            Camera.CameraType = Enum.CameraType.Scriptable
+            Camera.CFrame = CFrame.lookAt(myPos, myPos + unstickDirection * 50)
+            if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                movementPulseTimer = 0
+                pulseMovementKey(Enum.KeyCode.W)
+            end
+            movementPulseTimer = movementPulseTimer + deltaTime
+            return
+        end
+        
+        -- Mode transitions
+        if newMode ~= currentMode then
+            stopAllMovementKeys()
+            movementPulseTimer = CONFIG.MOVEMENT_PULSE_RATE
+            currentMode = newMode
+        end
+        
+        -- Force spectate in combat zone
+        if totalDist <= CONFIG.COMBAT_ZONE and not spectating then
+            startSpectating()
+        elseif totalDist > CONFIG.COMBAT_ZONE and spectating then
+            stopSpectating()
+        end
+        
+        movementPulseTimer = movementPulseTimer + deltaTime
+        local flightMode = "HORIZONTAL"
+        
+        -- Execute mode behavior
+        if currentMode == "STAMINA_REGEN" then
+            local stamina = getStamina() or 0
+            local effectiveMin = getEffectiveStaminaMin()
+            
+            -- Stamina too low to attack - back away from target
+            if stamina < effectiveMin then
+                -- Exit spectating for camera control
+                if spectating then stopSpectating() end
+                
+                Camera.CameraType = Enum.CameraType.Scriptable
+                -- Point camera away from target
+                local awayDir = (myPos - targetPos)
+                awayDir = Vector3.new(awayDir.X, 0, awayDir.Z)  -- Horizontal only
+                if awayDir.Magnitude < 1 then awayDir = Vector3.new(1, 0, 0) end
+                Camera.CFrame = CFrame.lookAt(myPos, myPos + awayDir.Unit * 50)
+                
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    pulseMovementKey(Enum.KeyCode.W)  -- Walk away
+                    tryRandomJump()  -- Jump to get over obstacles
+                end
+                flightMode = "RETREAT_LOW_STAM"
+            else
+                -- Stamina enough to attack - maintain optimal range
+                -- Enter spectating when in combat zone for aiming
+                if totalDist <= CONFIG.COMBAT_ZONE and not spectating then
+                    startSpectating()
+                elseif totalDist > CONFIG.COMBAT_ZONE and spectating then
+                    stopSpectating()
+                end
+                
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    
+                    if totalDist > CONFIG.OPTIMAL_MAX then
+                        -- Too far - walk toward target
+                        if spectating then
+                            moveWhileSpectating(true)
+                        else
+                            Camera.CameraType = Enum.CameraType.Scriptable
+                            local towardDir = Vector3.new(hVector.X, 0, hVector.Z).Unit
+                            Camera.CFrame = CFrame.lookAt(myPos, myPos + towardDir * 50)
+                            pulseMovementKey(Enum.KeyCode.W)
+                        end
+                        tryRandomJump()  -- Jump to get over hills
+                        flightMode = "APPROACH_WALK"
+                    elseif totalDist < CONFIG.OPTIMAL_MIN then
+                        -- Too close - back away to optimal mid
+                        if spectating then
+                            moveWhileSpectating(false)
+                        else
+                            Camera.CameraType = Enum.CameraType.Scriptable
+                            local awayDir = Vector3.new(-hVector.X, 0, -hVector.Z).Unit
+                            Camera.CFrame = CFrame.lookAt(myPos, myPos + awayDir * 50)
+                            pulseMovementKey(Enum.KeyCode.W)
+                        end
+                        tryCombatJump()  -- Combat jump to throw off aim
+                        flightMode = "BACKUP_WALK"
+                    elseif totalDist < CONFIG.OPTIMAL_MID then
+                        -- In range but below mid - back up a bit
+                        if spectating then
+                            moveWhileSpectating(false)
+                        end
+                        tryCombatJump()  -- Combat jump to throw off aim
+                        flightMode = "ADJUST_WALK"
+                    else
+                        -- In optimal range - attack!
+                        tryCombatJump()  -- Combat jump to throw off aim
+                        if not targetWasInvisible and not isAttacking then
+                            performQClickAttack()
+                        end
+                        flightMode = "ATTACK_WALK"
+                    end
+                end
+            end
+            
+        elseif currentMode == "TOO_CLOSE" then
+            ensureFlight()
+            if spectating then
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    moveWhileSpectating(false)
+                end
+            else
+                Camera.CameraType = Enum.CameraType.Scriptable
+                flightMode = pointCameraAway(myPos, targetPos)
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    pulseMovementKey(Enum.KeyCode.W)
+                end
+            end
+            
+        elseif currentMode == "ATTACK" then
+            ensureFlight()
+            if justAttacked then
+                if totalDist < CONFIG.OPTIMAL_MID then
+                    if spectating then
+                        if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                            movementPulseTimer = 0
+                            moveWhileSpectating(false)
+                        end
+                    else
+                        Camera.CameraType = Enum.CameraType.Scriptable
+                        flightMode = pointCameraAway(myPos, targetPos)
+                        if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                            movementPulseTimer = 0
+                            pulseMovementKey(Enum.KeyCode.W)
+                        end
+                    end
+                else
+                    justAttacked = false
+                end
+            else
+                if not targetWasInvisible and not isAttacking then
+                    performQClickAttack()
+                end
+            end
+            
+        elseif currentMode == "APPROACH" then
+            ensureFlight()
+            if spectating then
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    moveWhileSpectating(true)
+                end
+            else
+                Camera.CameraType = Enum.CameraType.Scriptable
+                flightMode = pointCameraForMovement(myPos, targetPos)
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    pulseMovementKey(Enum.KeyCode.W)
+                end
+            end
+            
+        elseif currentMode == "TRAVEL" then
+            ensureFlight()
+            Camera.CameraType = Enum.CameraType.Scriptable
+            
+            -- Use new angled flight logic
+            flightMode = pointCameraForMovement(myPos, targetPos)
+            
+            if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                movementPulseTimer = 0
+                pulseMovementKey(Enum.KeyCode.W)
+            end
+        end
+        
+        -- Debug
+        local stamina = getStamina() or 0
+        local attackCooldown = math.max(0, CONFIG.Q_CLICK_COOLDOWN - (tick() - lastQClickTime))
+        updateDebug(string.format(
+            [[Target: %s
+Mode: %s | Spectating: %s
+Distance: H=%.1f V=%.1f Total=%.1f
+Optimal: %d-%d studs
+Status: %s
+Stamina: %d | Air: %.1fs
+Attack CD: %.1fs | Flight: %s (%s)
+StuckTimer: %.1f/%.1fs]],
+            targetPlayer.Name,
+            currentMode,
+            tostring(spectating),
+            hDist, vDiff, totalDist,
+            CONFIG.OPTIMAL_MIN, CONFIG.OPTIMAL_MAX,
+            targetWasDead and "DEAD" or (targetWasInvisible and "INVISIBLE" or "ALIVE"),
+            stamina,
+            airRemaining,
+            attackCooldown,
+            tostring(hasFlight()),
+            flightMode,
+            stuckTimer,
+            CONFIG.STUCK_TIME_THRESHOLD
+        ))
+    end)
+end
+
+local function stopMovementLoop()
+    if movementLoop then movementLoop:Disconnect(); movementLoop = nil end
+    releaseKey(Enum.KeyCode.Q)
+    isAttacking = false
+end
+
+-- =====================================================
+-- TARGET SELECTION
+-- =====================================================
+
+local function getClosestPlayerToCursor()
+    local closest = nil
+    local minDist = math.huge
+    local mousePos = UserInputService:GetMouseLocation()
+    
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= player then
+            local root = getRoot(plr)
+            if root then
+                local success, pos, onScreen = pcall(function()
+                    return Camera:WorldToViewportPoint(root.Position)
+                end)
+                if success and onScreen then
+                    local screenDist = (Vector2.new(pos.X, pos.Y) - mousePos).Magnitude
+                    if screenDist < minDist then
+                        minDist = screenDist
+                        closest = plr
+                    end
+                end
+            end
+        end
+    end
+    return closest
+end
+
+-- =====================================================
+-- MAIN CONTROL
+-- =====================================================
+
+local function startFollowing()
+    flightDisabledForStamina = false
+    spectating = false
+    altIsDead = false
+    justAttacked = false
+    ensureFlight()
+    createDebugGui()
+    createTargetIndicator()
+    
+    movementPulseTimer = CONFIG.MOVEMENT_PULSE_RATE
+    lastTargetCheck = 0
+    targetWasDead = false
+    targetWasInvisible = false
+    currentMode = "IDLE"
+    isAttacking = false
+    lastFrameTime = 0
+    
+    isUnderwater = false
+    airRemaining = CONFIG.UNDERWATER_MAX_TIME
+    lastUnderwaterCheck = 0
+    cachedTargetInWater = false
+    stoppedFlightForDeath = false
+    hasSentTaunt = false
+    tauntScheduled = false
+    lastRandomWalkTime = 0
+    randomWalkDirection = nil
+    lastJumpTime = 0
+    lastCombatJumpTime = 0
+    lastCanAttackCheck = 0
+    lastCanAttackResult = false
+    emergencyDefenseActive = false
+    preEmergencyTask = nil
+    lastKnownHealth = getAltHealth()
+    resurfaceStarted = false
+    
+    -- Reset vertical tracking
+    lastVerticalDirection = 0
+    verticalDirectionStartTime = 0
+    
+    cached2xStamina = nil
+    cachedStaminaMin = nil
+    cachedStaminaRecharge = nil
+    
+    resetStuckDetection()
+    startCameraUpdate()
+    startMovementLoop()
+    
+    print("Started following", targetPlayer.Name)
+end
+
+local function stopFollowing()
+    following = false
+    targetPlayer = nil
+    currentMode = "IDLE"
+    flightDisabledForStamina = false
+    isAttacking = false
+    spectating = false
+    altIsDead = false
+    isUnderwater = false
+    airRemaining = CONFIG.UNDERWATER_MAX_TIME
+    cachedTargetInWater = false
+    stoppedFlightForDeath = false
+    hasSentTaunt = false
+    tauntScheduled = false
+    lastRandomWalkTime = 0
+    randomWalkDirection = nil
+    lastJumpTime = 0
+    lastCombatJumpTime = 0
+    emergencyDefenseActive = false
+    preEmergencyTask = nil
+    lastKnownHealth = 100
+    resurfaceStarted = false
+    
+    resetStuckDetection()
+    stopMovementLoop()
+    stopCameraUpdate()
+    stopAllMovementKeys()
+    releaseKey(Enum.KeyCode.Q)
+    releaseKey(Enum.KeyCode.Space)
+    
+    Camera.CameraType = Enum.CameraType.Custom
+    local hum = getHumanoid(player)
+    if hum then Camera.CameraSubject = hum end
+    UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+    
+    removeTargetIndicator()
+    if debugGui then debugGui:Destroy(); debugGui = nil end
+    
+    print("Stopped following")
+end
+
+-- =====================================================
+-- INPUT HANDLER
+-- =====================================================
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    
+    if input.KeyCode == Enum.KeyCode.N then
+        if not following then
+            local target = getClosestPlayerToCursor()
+            if target then
+                targetPlayer = target
+                following = true
+                lastKnownPosition = nil
+                startFollowing()
+            else
+                warn("No player found near cursor")
+            end
+        else
+            stopFollowing()
+        end
+    end
+end)
+
+-- =====================================================
+-- CLEANUP
+-- =====================================================
+
+player.CharacterAdded:Connect(function()
+    altIsDead = false
+    task.wait(1)
+    if targetPlayer and following then
+        flightDisabledForStamina = false
+        spectating = false
+        isAttacking = false
+        movementPulseTimer = CONFIG.MOVEMENT_PULSE_RATE
+        ensureFlight()
+        createTargetIndicator()
+        createDebugGui()
+    end
+end)
+
+player.CharacterRemoving:Connect(function()
+    altIsDead = true
+    stopSpectating()
+    releaseKey(Enum.KeyCode.Q)
+    isAttacking = false
+end)
+
+Players.PlayerRemoving:Connect(function(leavingPlayer)
+    if leavingPlayer == targetPlayer then stopFollowing() end
+end)
+
+-- =====================================================
+-- STARTUP
+-- =====================================================
+
+print("=" .. string.rep("=", 50))
+print("ALT FOLLOW SCRIPT V5.3.1 - SMOOTH VERTICAL + STAMINA")
+print("=" .. string.rep("=", 50))
+print("Controls: N - Toggle following (nearest to cursor)")
+print("")
+print("SMOOTH VERTICAL FLIGHT:")
+print("• Ignores small height changes (<" .. CONFIG.SMALL_HEIGHT_CHANGE .. " studs)")
+print("• Max vertical separation: " .. CONFIG.MAX_VERTICAL_SEPARATION .. " studs")
+print("• STEEP if horizontal < " .. CONFIG.HORIZONTAL_TOO_SMALL .. " studs")
+print("• ANGLED FLIGHT (ratio: " .. CONFIG.ANGLED_FLIGHT_RATIO .. ")")
+print("")
+print("STAMINA REGEN MODE:")
+print("• Low stamina: backs away + jumps over obstacles")
+print("• Enough stamina: maintains range + attacks")
+print("")
+print("GROUND COMBAT JUMPING:")
+print("• Walk jump: " .. (CONFIG.JUMP_CHANCE * 100) .. "% chance every " .. CONFIG.JUMP_INTERVAL .. "s")
+print("• Combat jump: " .. (CONFIG.COMBAT_JUMP_CHANCE * 100) .. "% chance (throws off aim)")
+print("")
+print("TAUNTS:")
+print("• Only if within " .. CONFIG.TAUNT_RANGE .. " studs when target died")
+print("• " .. CONFIG.TAUNT_MIN_DELAY .. "-" .. CONFIG.TAUNT_MAX_DELAY .. "s delay")
+print("")
+print("Combat: " .. CONFIG.OPTIMAL_MIN .. "-" .. CONFIG.OPTIMAL_MAX .. " studs")
+print("=" .. string.rep("=", 50))
