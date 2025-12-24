@@ -938,6 +938,15 @@ local Camera = workspace.CurrentCamera
 
 local player = Players.LocalPlayer
 
+-- Complete Alt Follow Script v5.4.45 - Smart Secondary Targeting
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Camera = workspace.CurrentCamera
+
+local player = Players.LocalPlayer
+
 -- =====================================================
 -- CORE VARIABLES
 -- =====================================================
@@ -975,14 +984,26 @@ local justAttacked = false
 local rememberedTargetUserId = nil
 local originalPrimaryUserId = nil  -- The first target (N key), for fallback when all die
 local manuallySwitchedTarget = false
+local mainTargetRespawnTime = 0     -- When main target respawned (for grace period)
 
 -- Multi-Target System (M key)
 local secondaryTargetUserIds = {}  -- Store UserIds (persist across rejoin)
 local MAX_SECONDARY_TARGETS = 2
+local onSecondaryTarget = false    -- True when currently attacking a secondary
 
 -- Telek Shield Tracking (20% chance per second blocked)
 local telekBlockStartTime = 0
 local lastTelekRollTime = 0
+
+-- River Method (dolphin dive for underwater combat)
+local targetTouchedWater = false
+local targetWaterStartTime = 0
+local riverMethodActive = false
+
+-- Unified "target unavailable" state (invisible, under map, flyro, boulder)
+local targetUnavailable = false
+local unavailableReason = nil  -- "INVISIBLE", "UNDER_MAP", "FLYRO", "BOULDER", "TERRAIN_BLOCKED"
+local unavailableRetreatDone = false  -- Have we retreated to 100 studs yet?
 
 -- Retreat State
 local retreatActive = false
@@ -1047,23 +1068,23 @@ local CONFIG = {
     OPTIMAL_MAX = 73.3,
     OPTIMAL_MID = 60,
     COMBAT_ZONE = 76,
-    
+
     -- Timing
     MOVEMENT_PULSE_RATE = 0.5,
     Q_CLICK_COOLDOWN = 1.5,
     KEY_PULSE_DURATION = 10,
     TARGET_CHECK_RATE = 0.1,
     FLIGHT_TOGGLE_COOLDOWN = 1,
-    
+
     -- Stamina Management
     STAMINA_MIN = 40,
     STAMINA_RECHARGE_THRESHOLD = 140,
-    
+
     -- Combat
     LINE_OF_SIGHT_CHECKS = 20,
     CLICK_BELOW_OFFSET = 150,      -- Pixels below center for pull attack
     CLICK_ABOVE_OFFSET = 150,      -- Pixels above center for push attack
-    
+
     -- Vertical Flight
     VERTICAL_THRESHOLD = 10,
     VERTICAL_PRIORITY_THRESHOLD = 25,
@@ -1072,53 +1093,63 @@ local CONFIG = {
     ANGLED_FLIGHT_RATIO = 0.5,
     VERTICAL_DIRECTION_HOLD_TIME = 0.6,
     HORIZONTAL_TOO_SMALL = 100,
-    
+
     -- Stuck Detection
     STUCK_VELOCITY_THRESHOLD = 3,
     STUCK_TIME_THRESHOLD = 0.4,
     UNSTUCK_DURATION = 3,
     UNSTUCK_SCAN_DISTANCE = 100,
     UNSTUCK_SPHERE_POINTS = 100,
-    
+
     -- Terrain Protection
     TERRAIN_CHECK_DISTANCE = 4,
-    
+
     -- Underwater
     UNDERWATER_MAX_TIME = 10,
-    
+
     -- River boundaries
     RIVER_X_MIN = -550,
     RIVER_X_MAX = -100,
     RIVER_Z_MIN = -740,
     RIVER_Z_MAX = 580,
     RIVER_SURFACE_Y = -40,
-    
+    RIVER_COMMIT_TIME = 1.0,      -- Seconds in water before committing to river method
+    RIVER_EXIT_HEIGHT = 20,       -- Exit river method if target > this many studs above surface
+    AIR_RESURFACE_THRESHOLD = 2,  -- Pop head out when air <= this
+
     -- Under map detection
     UNDER_MAP_Y = -85,
-    
+
     -- Taunts
     TAUNT_MIN_DELAY = 1.0,
     TAUNT_MAX_DELAY = 1.5,
     TAUNT_RANGE = 100,
-    
+
     -- Ground movement jumping
     JUMP_CHANCE = 0.3,
     JUMP_INTERVAL = 0.8,
     COMBAT_JUMP_CHANCE = 0.4,
-    
+
     -- Curve acceleration (flight boost)
     CURVE_THRESHOLD = 0.30,
     CURVE_DEVIATION_RATIO = 0.20,
     CURVE_MIN_VELOCITY = 5,
-    
+
     -- Shield detection
     TELEK_SHIELD_DIAMETER = 29,    -- Telekinesis shield disk diameter
-    TELEK_GRAB_CHANCE = 0.20,      -- 20% chance to grab through telek shield
-    
-    -- Retreat behaviors
-    INVISIBILITY_RETREAT_DIST = 300,   -- Fly this far when target invisible
-    INVISIBILITY_STAY_RANGE = 100,     -- Stay within this range of retreat point
-    TERRAIN_BLOCK_RETREAT_DIST = 100,  -- Retreat dist when blocked by terrain below
+    TELEK_GRAB_CHANCE = 0.20,      -- 20% chance/sec while blocked
+
+    -- Unified unavailable behavior (invisible, under map, flyro, boulder, terrain blocked)
+    UNAVAILABLE_RETREAT_DIST = 100,   -- Retreat to this distance
+    UNAVAILABLE_STAY_RANGE = 30,      -- Stay within +/- this range of retreat point
+    UNAVAILABLE_JUMP_CHANCE = 0.4,    -- Chance to jump while walking
+
+    -- =================================================
+    -- Secondary targeting settings
+    -- =================================================
+    ENABLE_TARGET_SWITCHING = true,
+    SECONDARY_TARGET_RANGE = 140,  -- Can only "see" secondaries within this range
+    MAIN_RESPAWN_GRACE = 0.5,      -- Seconds after main respawns before switching back (finish secondary kill)
 }
 
 -- =====================================================
@@ -1134,8 +1165,8 @@ end
 local function getRoot(plr)
     local char = getChar(plr)
     if not char then return nil end
-    return char:FindFirstChild("HumanoidRootPart") or 
-           char:FindFirstChild("Torso") or 
+    return char:FindFirstChild("HumanoidRootPart") or
+           char:FindFirstChild("Torso") or
            char:FindFirstChild("UpperTorso") or
            char.PrimaryPart
 end
@@ -1250,17 +1281,17 @@ local function isTerrainBelow()
     local now = tick()
     if now - lastTerrainCheck < 0.1 then return lastTerrainResult end
     lastTerrainCheck = now
-    
+
     local char = getChar(player)
     if not char then lastTerrainResult = false; return false end
-    
+
     local head = char:FindFirstChild("Head")
     local upperTorso = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
-    
+
     local raycastParams = RaycastParams.new()
     raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
     raycastParams.FilterDescendantsInstances = {char}
-    
+
     for _, part in ipairs({head, upperTorso}) do
         if part then
             local result = workspace:Raycast(part.Position, Vector3.new(0, -CONFIG.TERRAIN_CHECK_DISTANCE, 0), raycastParams)
@@ -1270,7 +1301,7 @@ local function isTerrainBelow()
             end
         end
     end
-    
+
     lastTerrainResult = false
     return false
 end
@@ -1376,9 +1407,36 @@ local function canEnterCombatMode()
     return true
 end
 
+-- Check if target is under the map (Y check OR terrain blocked when not in river)
 local function isTargetUnderMap(targetPos)
     if not targetPos then return false end
-    return targetPos.Y <= CONFIG.UNDER_MAP_Y
+    -- Direct Y check
+    if targetPos.Y <= CONFIG.UNDER_MAP_Y then return true end
+    return false
+end
+
+-- Check if target is blocked by terrain between alt and target (indicates under map if not in river)
+local function isTargetBehindTerrain(myPos, targetPos)
+    if not myPos or not targetPos then return false end
+    -- If target is in river bounds, don't use terrain check (river has terrain)
+    if isInRiverBoundsHorizontal(targetPos) then return false end
+    
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {
+        workspace:FindFirstChild("Characters"),
+        player.Character,
+        targetPlayer and targetPlayer.Character
+    }
+    
+    local result = workspace:Raycast(myPos, targetPos - myPos, raycastParams)
+    if result and result.Instance then
+        -- Check if it's terrain blocking
+        if result.Instance:IsA("Terrain") or result.Instance.Name == "Terrain" then
+            return true
+        end
+    end
+    return false
 end
 
 -- Check if position is in river bounds (horizontal only)
@@ -1406,21 +1464,21 @@ end
 -- Check if alt needs to dive down to reach river target
 local function shouldDiveForRiverTarget(myPos, targetPos)
     if not myPos or not targetPos then return false end
-    
+
     -- Target must be in river zone
     if not isTargetInRiverZone(targetPos) then return false end
-    
+
     -- Target is underwater (below surface)
     local targetUnderwater = targetPos.Y <= CONFIG.RIVER_SURFACE_Y
-    
+
     -- Alt is above water
     local altAboveWater = myPos.Y > CONFIG.RIVER_SURFACE_Y
-    
+
     -- If target underwater and alt above water, need to dive
     if targetUnderwater and altAboveWater then
         return true
     end
-    
+
     return false
 end
 
@@ -1451,6 +1509,108 @@ local function canGrabRiverTarget(myPos, targetPos)
     return clearCount >= 2
 end
 
+-- Check if target's root is actually in water (not just in river zone)
+local function isTargetRootInWater()
+    if not targetPlayer then return false end
+    local root = getRoot(targetPlayer)
+    if not root then return false end
+    return waterAtPoint(root.Position, 2.0, getChar(targetPlayer))
+end
+
+-- Check if target is within river method engagement range
+local function isTargetInRiverMethodRange(targetPos)
+    if not targetPos then return false end
+    if not isInRiverBoundsHorizontal(targetPos) then return false end
+    if targetPos.Y <= CONFIG.UNDER_MAP_Y then return false end
+    -- Must be within 20 studs above surface (or below)
+    return targetPos.Y <= CONFIG.RIVER_SURFACE_Y + CONFIG.RIVER_EXIT_HEIGHT
+end
+
+-- Update river method tracking state
+local function updateRiverMethodState(targetPos, now)
+    -- Check exit conditions first
+    if not isTargetInRiverMethodRange(targetPos) then
+        -- Target left river method range - reset everything
+        riverMethodActive = false
+        targetTouchedWater = false
+        targetWaterStartTime = 0
+        return
+    end
+    
+    -- Target is in river bounds and within height range
+    local rootInWater = isTargetRootInWater()
+    
+    if rootInWater then
+        if not targetTouchedWater then
+            -- First time touching water
+            targetTouchedWater = true
+            targetWaterStartTime = now
+        elseif not riverMethodActive and (now - targetWaterStartTime >= CONFIG.RIVER_COMMIT_TIME) then
+            -- Been in water 1+ second - commit to river method
+            riverMethodActive = true
+            print("River method activated - target committed to water")
+        end
+    end
+    -- Note: Don't reset targetTouchedWater if they pop out briefly - only reset when leaving range
+end
+
+-- Resurface for air (dolphin up)
+local function tryResurface(myPos)
+    -- Pop head out - aim for surface + 3 studs
+    local surfacePoint = Vector3.new(myPos.X, CONFIG.RIVER_SURFACE_Y + 3, myPos.Z)
+    Camera.CameraType = Enum.CameraType.Scriptable
+    Camera.CFrame = CFrame.lookAt(myPos, surfacePoint)
+    -- Don't try to fly - just swim up with W + Space
+    -- Flight is not needed underwater, swimming works fine
+    pulseMovementKey(Enum.KeyCode.W)
+    pulseMovementKey(Enum.KeyCode.Space)  -- Swim up
+end
+
+-- Unpredictable walking behavior for when target is unavailable
+local lastUnpredictableWalkTime = 0
+local unpredictableWalkDirection = nil
+local unpredictableWalkDuration = 0
+
+local function doUnpredictableWalk(myPos, targetPos)
+    local currentTime = tick()
+    
+    -- Change direction every 1-3 seconds
+    if not unpredictableWalkDirection or currentTime - lastUnpredictableWalkTime > unpredictableWalkDuration then
+        lastUnpredictableWalkTime = currentTime
+        unpredictableWalkDuration = 1 + math.random() * 2  -- 1-3 seconds
+        
+        -- Random direction, but generally stay near 100 studs from target
+        local distToTarget = (myPos - targetPos).Magnitude
+        local awayDir = (myPos - targetPos)
+        if awayDir.Magnitude > 0.1 then awayDir = awayDir.Unit else awayDir = Vector3.new(1, 0, 0) end
+        
+        -- Add randomness - pick angle offset from away direction
+        local angleOffset = (math.random() - 0.5) * math.pi  -- -90 to +90 degrees
+        local cos, sin = math.cos(angleOffset), math.sin(angleOffset)
+        unpredictableWalkDirection = Vector3.new(
+            awayDir.X * cos - awayDir.Z * sin,
+            0,
+            awayDir.X * sin + awayDir.Z * cos
+        )
+        
+        -- Random chance to jump
+        if math.random() < CONFIG.UNAVAILABLE_JUMP_CHANCE then
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+                task.wait(0.1)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+            end)
+        end
+    end
+    
+    -- Move in current direction
+    if unpredictableWalkDirection then
+        Camera.CameraType = Enum.CameraType.Scriptable
+        Camera.CFrame = CFrame.lookAt(myPos, myPos + unpredictableWalkDirection * 20)
+        pulseMovementKey(Enum.KeyCode.W)
+    end
+end
+
 -- =====================================================
 -- CHAT/TAUNT SYSTEM
 -- =====================================================
@@ -1477,14 +1637,17 @@ local function sendRandomTaunt()
     end
 end
 
+-- Forward declaration (used before definition in file)
+local stopAllMovementKeys
+
 local function scheduleTaunt(distanceWhenDied)
     if tauntScheduled then return end
-    
+
     -- Only taunt if we were within range when target died
     if distanceWhenDied and distanceWhenDied > CONFIG.TAUNT_RANGE then
         return  -- Too far away, don't taunt
     end
-    
+
     tauntScheduled = true
     local delay = CONFIG.TAUNT_MIN_DELAY + math.random() * (CONFIG.TAUNT_MAX_DELAY - CONFIG.TAUNT_MIN_DELAY)
     task.spawn(function()
@@ -1493,10 +1656,10 @@ local function scheduleTaunt(distanceWhenDied)
             -- Pause movement while taunting (0.5-0.8s)
             tauntPauseActive = true
             stopAllMovementKeys()
-            
+
             sendRandomTaunt()
             hasSentTaunt = true
-            
+
             -- Random pause duration
             local pauseDuration = 0.5 + math.random() * 0.3  -- 0.5 to 0.8
             task.wait(pauseDuration)
@@ -1564,7 +1727,7 @@ end
 local activeKeyThreads = {}
 local keyHeldState = {}
 
-local function stopAllMovementKeys()
+stopAllMovementKeys = function()
     for keyName, _ in pairs(activeKeyThreads) do
         activeKeyThreads[keyName] = nil
     end
@@ -1644,12 +1807,12 @@ local function tryRandomJump()
     if currentTime - lastJumpTime < CONFIG.JUMP_INTERVAL then
         return false
     end
-    
+
     -- Only jump if not flying
     if hasFlight() then
         return false
     end
-    
+
     -- Random chance to jump
     if math.random() < CONFIG.JUMP_CHANCE then
         lastJumpTime = currentTime
@@ -1660,7 +1823,7 @@ local function tryRandomJump()
         end)
         return true
     end
-    
+
     return false
 end
 
@@ -1670,12 +1833,12 @@ local function tryCombatJump()
     if currentTime - lastCombatJumpTime < CONFIG.JUMP_INTERVAL then
         return false
     end
-    
+
     -- Only jump if not flying
     if hasFlight() then
         return false
     end
-    
+
     -- Higher chance during combat
     if math.random() < CONFIG.COMBAT_JUMP_CHANCE then
         lastCombatJumpTime = currentTime
@@ -1686,134 +1849,33 @@ local function tryCombatJump()
         end)
         return true
     end
-    
+
     return false
 end
 
 -- =====================================================
 -- CURVE ACCELERATION (Flight Speed Boost)
 -- =====================================================
--- Instead of just pressing W, strafe into the curve to accelerate faster
--- Target RIGHT of velocity → W + D (curve right)
--- Target LEFT of velocity → W + A (curve left)
 
 local function getCurveDirection(myPos, targetPos, velocity)
-    -- Need minimum velocity to calculate curve
     if velocity.Magnitude < CONFIG.CURVE_MIN_VELOCITY then
         return "STRAIGHT", 0
     end
-    
-    -- Get direction to target (horizontal)
+
     local toTarget = targetPos - myPos
     toTarget = Vector3.new(toTarget.X, 0, toTarget.Z)
-    
+
     if toTarget.Magnitude < 1 then
         return "STRAIGHT", 0
     end
-    
-    -- Get velocity direction (horizontal)
+
     local velDir = Vector3.new(velocity.X, 0, velocity.Z)
     if velDir.Magnitude < 1 then
         return "STRAIGHT", 0
     end
-    
-    -- Cross product: velocity × toTarget
-    -- Positive Y = target is to the RIGHT of velocity
-    -- Negative Y = target is to the LEFT of velocity
+
     local cross = velDir.Unit:Cross(toTarget.Unit)
-    
-    if cross.Y > CONFIG.CURVE_THRESHOLD then
-        return "RIGHT", cross.Y  -- Target right of velocity → curve right → W + D
-    elseif cross.Y < -CONFIG.CURVE_THRESHOLD then
-        return "LEFT", cross.Y   -- Target left of velocity → curve left → W + A
-    else
-        return "STRAIGHT", cross.Y
-    end
-end
 
--- Calculate deviation from straight line path to target
-local function getPathDeviation(myPos, targetPos, velocity)
-    local toTarget = targetPos - myPos
-    local distance = toTarget.Magnitude
-    
-    if distance < 10 then
-        return 0, 0  -- Too close, no deviation calc needed
-    end
-    
-    -- Project velocity onto toTarget to get "on-path" component
-    local toTargetUnit = toTarget.Unit
-    local velOnPath = velocity:Dot(toTargetUnit)
-    
-    -- Get perpendicular component (deviation)
-    local velPerp = velocity - (toTargetUnit * velOnPath)
-    local deviation = velPerp.Magnitude
-    
-    -- Max allowed deviation scales with distance
-    local maxDeviation = distance * CONFIG.CURVE_DEVIATION_RATIO
-    
-    return deviation, maxDeviation
-end
-
--- Pulse W + appropriate strafe for curve acceleration
--- Returns true if curve boost was applied, false if just W
-local function pulseCurveAcceleration(myPos, targetPos)
-    local myRoot = getRoot(player)
-    if not myRoot then
-        pulseMovementKey(Enum.KeyCode.W)
-        return false
-    end
-    
-    local velocity = myRoot.Velocity
-    local curveDir, crossY = getCurveDirection(myPos, targetPos, velocity)
-    local deviation, maxDeviation = getPathDeviation(myPos, targetPos, velocity)
-    
-    -- Always press W
-    pulseMovementKey(Enum.KeyCode.W)
-    
-    -- Check if we're deviating too much
-    if deviation > maxDeviation and maxDeviation > 0 then
-        -- Drifting too far - strafe OPPOSITE to correct
-        if crossY > 0 then
-            -- We were curving right, now strafe left to correct
-            pulseMovementKey(Enum.KeyCode.A)
-            return true, "CORRECT_LEFT"
-        elseif crossY < 0 then
-            -- We were curving left, now strafe right to correct
-            pulseMovementKey(Enum.KeyCode.D)
-            return true, "CORRECT_RIGHT"
-        end
-    end
-    
-    -- Normal curve boost
-    if curveDir == "RIGHT" then
-        pulseMovementKey(Enum.KeyCode.D)
-        return true, "CURVE_RIGHT"
-    elseif curveDir == "LEFT" then
-        pulseMovementKey(Enum.KeyCode.A)
-        return true, "CURVE_LEFT"
-    end
-    
-    return false, "STRAIGHT"
-end
-
--- Vertical curve acceleration (for ascend/descend)
-local function getCurveDirectionVertical(myPos, targetPos, velocity)
-    -- Need minimum velocity
-    if velocity.Magnitude < CONFIG.CURVE_MIN_VELOCITY then
-        return "STRAIGHT", 0
-    end
-    
-    -- For vertical movement, check if target is above/below our velocity direction
-    -- Use XY or ZY plane depending on which has more movement
-    local toTarget = targetPos - myPos
-    
-    -- Cross product in vertical plane
-    local cross = velocity.Unit:Cross(toTarget.Unit)
-    
-    -- For vertical curves, we care about the horizontal component of cross
-    -- which tells us if we're curving up or down relative to target
-    local horizCross = math.sqrt(cross.X * cross.X + cross.Z * cross.Z)
-    
     if cross.Y > CONFIG.CURVE_THRESHOLD then
         return "RIGHT", cross.Y
     elseif cross.Y < -CONFIG.CURVE_THRESHOLD then
@@ -1823,20 +1885,57 @@ local function getCurveDirectionVertical(myPos, targetPos, velocity)
     end
 end
 
-local function tryResurface()
-    local myRoot = getRoot(player)
-    if not myRoot then return end
-    Camera.CameraType = Enum.CameraType.Scriptable
-    Camera.CFrame = CFrame.lookAt(myRoot.Position, myRoot.Position + Vector3.new(0, 20, 0))
-    local stamina = getStamina()
-    local canFly = hasFlight() or (stamina and stamina >= getEffectiveStaminaMin())
-    if canFly and not isUnderwater then
-        ensureFlight()
-        pulseMovementKey(Enum.KeyCode.W)
-    else
-        pulseMovementKey(Enum.KeyCode.W)
-        pulseMovementKey(Enum.KeyCode.Space)
+local function getPathDeviation(myPos, targetPos, velocity)
+    local toTarget = targetPos - myPos
+    local distance = toTarget.Magnitude
+
+    if distance < 10 then
+        return 0, 0
     end
+
+    local toTargetUnit = toTarget.Unit
+    local velOnPath = velocity:Dot(toTargetUnit)
+
+    local velPerp = velocity - (toTargetUnit * velOnPath)
+    local deviation = velPerp.Magnitude
+
+    local maxDeviation = distance * CONFIG.CURVE_DEVIATION_RATIO
+
+    return deviation, maxDeviation
+end
+
+local function pulseCurveAcceleration(myPos, targetPos)
+    local myRoot = getRoot(player)
+    if not myRoot then
+        pulseMovementKey(Enum.KeyCode.W)
+        return false
+    end
+
+    local velocity = myRoot.Velocity
+    local curveDir, crossY = getCurveDirection(myPos, targetPos, velocity)
+    local deviation, maxDeviation = getPathDeviation(myPos, targetPos, velocity)
+
+    pulseMovementKey(Enum.KeyCode.W)
+
+    if deviation > maxDeviation and maxDeviation > 0 then
+        if crossY > 0 then
+            pulseMovementKey(Enum.KeyCode.A)
+            return true, "CORRECT_LEFT"
+        elseif crossY < 0 then
+            pulseMovementKey(Enum.KeyCode.D)
+            return true, "CORRECT_RIGHT"
+        end
+    end
+
+    if curveDir == "RIGHT" then
+        pulseMovementKey(Enum.KeyCode.D)
+        return true, "CURVE_RIGHT"
+    elseif curveDir == "LEFT" then
+        pulseMovementKey(Enum.KeyCode.A)
+        return true, "CURVE_LEFT"
+    end
+
+    return false, "STRAIGHT"
 end
 
 -- =====================================================
@@ -1866,14 +1965,13 @@ local function sendMouseClick()
     end)
 end
 
--- Click above center = push target FORWARD (away from alt)
 local function sendClickAboveCenter()
     local viewportSize = Camera.ViewportSize
     local centerX = viewportSize.X / 2
     local centerY = viewportSize.Y / 2
-    local clickY = centerY - CONFIG.CLICK_ABOVE_OFFSET  -- - means UP
+    local clickY = centerY - CONFIG.CLICK_ABOVE_OFFSET
     if clickY < 10 then clickY = 10 end
-    
+
     pcall(function()
         VirtualInputManager:SendMouseButtonEvent(centerX, clickY, 0, true, game, 0)
     end)
@@ -1883,14 +1981,13 @@ local function sendClickAboveCenter()
     end)
 end
 
--- Click below center = pull target BACKWARD (toward alt)
 local function sendClickBelowCenter()
     local viewportSize = Camera.ViewportSize
     local centerX = viewportSize.X / 2
     local centerY = viewportSize.Y / 2
-    local clickY = centerY + CONFIG.CLICK_BELOW_OFFSET  -- + means DOWN
+    local clickY = centerY + CONFIG.CLICK_BELOW_OFFSET
     if clickY > viewportSize.Y - 10 then clickY = viewportSize.Y - 10 end
-    
+
     pcall(function()
         VirtualInputManager:SendMouseButtonEvent(centerX, clickY, 0, true, game, 0)
     end)
@@ -1905,9 +2002,7 @@ end
 -- =====================================================
 
 local function isVelocityStuck(velocity)
-    -- Only check horizontal velocity (X and Z)
-    -- Jumping changes Y velocity but doesn't mean we're unstuck horizontally
-    return math.abs(velocity.X) < CONFIG.STUCK_VELOCITY_THRESHOLD 
+    return math.abs(velocity.X) < CONFIG.STUCK_VELOCITY_THRESHOLD
        and math.abs(velocity.Z) < CONFIG.STUCK_VELOCITY_THRESHOLD
 end
 
@@ -1915,7 +2010,7 @@ local function scanForAlternativePath(myPos, targetPos)
     local toTarget = (targetPos - myPos).Unit
     local numPoints = CONFIG.UNSTUCK_SPHERE_POINTS
     local goldenRatio = (1 + math.sqrt(5)) / 2
-    
+
     local raycastParams = RaycastParams.new()
     raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
     raycastParams.FilterDescendantsInstances = {
@@ -1923,10 +2018,10 @@ local function scanForAlternativePath(myPos, targetPos)
         player.Character,
         targetPlayer and targetPlayer.Character
     }
-    
+
     local bestDirection = nil
     local bestScore = -math.huge
-    
+
     for i = 0, numPoints - 1 do
         local theta = 2 * math.pi * i / goldenRatio
         local phi = math.acos(1 - 2 * (i + 0.5) / numPoints)
@@ -1934,7 +2029,7 @@ local function scanForAlternativePath(myPos, targetPos)
         local y = math.cos(phi)
         local z = math.sin(phi) * math.sin(theta)
         local dir = Vector3.new(x, y, z)
-        
+
         local result = workspace:Raycast(myPos, dir * CONFIG.UNSTUCK_SCAN_DISTANCE, raycastParams)
         local clearDistance = result and (result.Position - myPos).Magnitude or CONFIG.UNSTUCK_SCAN_DISTANCE
         local dotToTarget = dir:Dot(toTarget)
@@ -1946,7 +2041,7 @@ local function scanForAlternativePath(myPos, targetPos)
             bestDirection = dir
         end
     end
-    
+
     return bestDirection or Vector3.new(0, 1, 0)
 end
 
@@ -1994,118 +2089,176 @@ end
 -- LINE OF SIGHT
 -- =====================================================
 
--- Get raycast filter list (characters + trees + earth)
 local function getRaycastFilter()
     local filterList = {
         workspace:FindFirstChild("Characters"),
         player.Character,
         targetPlayer and targetPlayer.Character
     }
-    
-    -- Add trees to ignore
+
     local trunks = workspace:FindFirstChild("World") and workspace.World:FindFirstChild("Trunks")
     if trunks then
         for _, tree in ipairs(trunks:GetChildren()) do
             table.insert(filterList, tree)
         end
     end
-    
-    -- Add earth objects to ignore
+
     local earth = workspace:FindFirstChild("World") and workspace.World:FindFirstChild("Earth")
     if earth then
         for _, earthPart in ipairs(earth:GetChildren()) do
             table.insert(filterList, earthPart)
         end
     end
-    
+
     return filterList
 end
 
--- Check if target is inside a Flyro Shield (dome)
 local function isInFlyroShield(targetPos)
-    -- Raycast upward from target to check for dome shield
     local raycastParams = RaycastParams.new()
     raycastParams.FilterType = Enum.RaycastFilterType.Whitelist
-    
+
     local shieldParts = workspace:FindFirstChild("World") and workspace.World:FindFirstChild("ShieldParts")
     if not shieldParts then return false end
-    
+
     raycastParams.FilterDescendantsInstances = {shieldParts}
-    
+
     local result = workspace:Raycast(targetPos, Vector3.new(0, 50, 0), raycastParams)
     if result and result.Instance then
         local parent = result.Instance.Parent
         if parent and parent:FindFirstChild("Forceshield") then
-            return true  -- Inside flyro dome shield
+            return true
         end
     end
-    
+
     return false
 end
 
--- Check if blocked by Telek Shield (disk)
+-- Check if blocked by Telek Shield (disk) - MUST be from ShieldParts
 -- Returns: "FLYRO" (don't grab), "TELEK" (20% chance), or nil (no shield)
 local function checkShieldBlocking(fromPos, toPos)
     local raycastParams = RaycastParams.new()
     raycastParams.FilterType = Enum.RaycastFilterType.Whitelist
-    
+
     local shieldParts = workspace:FindFirstChild("World") and workspace.World:FindFirstChild("ShieldParts")
     if not shieldParts then return nil end
-    
+
     raycastParams.FilterDescendantsInstances = {shieldParts}
-    
+
     local result = workspace:Raycast(fromPos, toPos - fromPos, raycastParams)
     if result and result.Instance then
-        local parent = result.Instance.Parent
-        if parent then
-            if parent:FindFirstChild("Forceshield") then
-                return "FLYRO"  -- Dome shield - never grab
-            elseif parent:FindFirstChild("Telekinesis") then
-                return "TELEK"  -- Disk shield - 20% chance
+        -- Must be a descendant of ShieldParts to count as a shield
+        local part = result.Instance
+        if part:IsDescendantOf(shieldParts) then
+            local parent = part.Parent
+            if parent then
+                if parent:FindFirstChild("Forceshield") then
+                    return "FLYRO"
+                elseif parent:FindFirstChild("Telekinesis") then
+                    return "TELEK"
+                end
             end
         end
     end
-    
+
     return nil
 end
 
--- Check if can grab target (shield logic)
 local function canGrabTarget(myPos, targetPos)
-    -- First check if target is in flyro dome
     if isInFlyroShield(targetPos) then
-        telekBlockStartTime = 0  -- Reset telek tracking
+        telekBlockStartTime = 0
         return false, "FLYRO_DOME"
     end
-    
-    -- Check if shield is blocking
+
     local shieldType = checkShieldBlocking(myPos, targetPos)
     if shieldType == "FLYRO" then
-        telekBlockStartTime = 0  -- Reset telek tracking
+        telekBlockStartTime = 0
         return false, "FLYRO_BLOCKED"
     elseif shieldType == "TELEK" then
         local currentTime = tick()
-        
-        -- Start tracking if not already
+
         if telekBlockStartTime == 0 then
             telekBlockStartTime = currentTime
             lastTelekRollTime = currentTime
         end
-        
-        -- Roll 20% chance each second while blocked
+
         if currentTime - lastTelekRollTime >= 1.0 then
             lastTelekRollTime = currentTime
             if math.random() < CONFIG.TELEK_GRAB_CHANCE then
-                telekBlockStartTime = 0  -- Reset on success
+                telekBlockStartTime = 0
                 return true, "TELEK_THROUGH"
             end
         end
-        
+
         return false, "TELEK_BLOCKED"
     end
-    
-    -- Not blocked - reset telek tracking
+
     telekBlockStartTime = 0
     return true, "CLEAR"
+end
+
+-- Check if target is trapped inside earth/boulder (check 6 directions within 10 studs)
+-- If trapped on all sides, don't throw through earth
+local function isTargetTrappedInEarth(targetPos)
+    local earth = workspace:FindFirstChild("World") and workspace.World:FindFirstChild("Earth")
+    if not earth then return false end
+    
+    local checkDist = 10
+    local directions = {
+        Vector3.new(1, 0, 0),   -- Right
+        Vector3.new(-1, 0, 0),  -- Left
+        Vector3.new(0, 1, 0),   -- Top
+        Vector3.new(0, -1, 0),  -- Bottom
+        Vector3.new(0, 0, 1),   -- Front
+        Vector3.new(0, 0, -1),  -- Back
+    }
+    
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Whitelist
+    raycastParams.FilterDescendantsInstances = {earth}
+    
+    local blockedCount = 0
+    for _, dir in ipairs(directions) do
+        local result = workspace:Raycast(targetPos, dir * checkDist, raycastParams)
+        if result then
+            blockedCount = blockedCount + 1
+        end
+    end
+    
+    -- If blocked on 4+ sides, they're trapped
+    return blockedCount >= 4
+end
+
+-- Unified check for target unavailability (all treated the same way)
+-- Returns: reason string or nil if available
+local function checkTargetUnavailable(myPos, targetPos)
+    if not targetPos then return nil end
+    
+    -- Check invisible
+    if isTargetInvisible() then
+        return "INVISIBLE"
+    end
+    
+    -- Check under map (Y position)
+    if isTargetUnderMap(targetPos) then
+        return "UNDER_MAP"
+    end
+    
+    -- Check terrain blocked (not in river) - indicates under map
+    if isTargetBehindTerrain(myPos, targetPos) then
+        return "TERRAIN_BLOCKED"
+    end
+    
+    -- Check flyro shield
+    if isInFlyroShield(targetPos) then
+        return "FLYRO"
+    end
+    
+    -- Check boulder trapped
+    if isTargetTrappedInEarth(targetPos) then
+        return "BOULDER"
+    end
+    
+    return nil  -- Target is available
 end
 
 local function hasLineOfSight(fromPos, toPos)
@@ -2123,14 +2276,13 @@ local function hasCompleteLineOfSight(myRoot, targetRoot)
     local myPos = myRoot.Position
     local targetPos = targetRoot.Position
     local direction = (targetPos - myPos).Unit
-    local distance = (targetPos - myPos).Magnitude
-    
+
     local upVector = Vector3.new(0, 1, 0)
     local rightVector = direction:Cross(upVector)
     if rightVector.Magnitude < 0.1 then rightVector = direction:Cross(Vector3.new(1, 0, 0)) end
     rightVector = rightVector.Unit
     local upPerpVector = rightVector:Cross(direction).Unit
-    
+
     local spreadRadius = 3
     local coneRays = {targetPos}
     local numRingRays = CONFIG.LINE_OF_SIGHT_CHECKS - 1
@@ -2139,7 +2291,7 @@ local function hasCompleteLineOfSight(myRoot, targetRoot)
         local offset = rightVector * math.cos(angle) * spreadRadius + upPerpVector * math.sin(angle) * spreadRadius
         table.insert(coneRays, targetPos + offset)
     end
-    
+
     local visibleRays = 0
     for _, endPoint in ipairs(coneRays) do
         if hasLineOfSight(myPos, endPoint) then visibleRays = visibleRays + 1 end
@@ -2147,24 +2299,21 @@ local function hasCompleteLineOfSight(myRoot, targetRoot)
     return visibleRays >= math.ceil(#coneRays * 0.5)
 end
 
--- Check if target is blocked by terrain below alt (for retreat logic)
 local function isTargetBlockedByTerrainBelow(myPos, targetPos)
-    -- Only check if target is below us
     if targetPos.Y >= myPos.Y then return false end
-    
+
     local raycastParams = RaycastParams.new()
     raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
     raycastParams.FilterDescendantsInstances = getRaycastFilter()
-    
+
     local result = workspace:Raycast(myPos, targetPos - myPos, raycastParams)
     if result then
-        -- Check if it's terrain blocking
         local hitPart = result.Instance
         if hitPart and (hitPart:IsDescendantOf(workspace.Terrain) or hitPart.Name == "Terrain" or hitPart.Anchored) then
             return true
         end
     end
-    
+
     return false
 end
 
@@ -2176,11 +2325,11 @@ local function createTargetIndicator()
     if targetIndicator then targetIndicator:Destroy(); targetIndicator = nil end
     if targetBillboard then targetBillboard:Destroy(); targetBillboard = nil end
     if not targetPlayer then return end
-    
+
     local targetChar = getChar(targetPlayer)
     local targetRoot = getRoot(targetPlayer)
     if not targetChar or not targetRoot then return end
-    
+
     local selectionBox = Instance.new("SelectionBox")
     selectionBox.Name = "TargetIndicator"
     selectionBox.Adornee = targetChar
@@ -2189,21 +2338,21 @@ local function createTargetIndicator()
     selectionBox.Transparency = 0.3
     selectionBox.Parent = targetChar
     targetIndicator = selectionBox
-    
+
     local billboard = Instance.new("BillboardGui")
     billboard.Name = "TargetBillboard"
     billboard.Adornee = targetRoot
     billboard.Size = UDim2.new(0, 200, 0, 50)
     billboard.StudsOffset = Vector3.new(0, 5, 0)
     billboard.AlwaysOnTop = true
-    
+
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, 0, 1, 0)
     frame.BackgroundTransparency = 0.5
     frame.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
     frame.BorderSizePixel = 0
     frame.Parent = billboard
-    
+
     local text = Instance.new("TextLabel")
     text.Size = UDim2.new(1, 0, 1, 0)
     text.BackgroundTransparency = 1
@@ -2212,7 +2361,7 @@ local function createTargetIndicator()
     text.TextScaled = true
     text.Font = Enum.Font.SourceSansBold
     text.Parent = frame
-    
+
     billboard.Parent = targetRoot
     targetBillboard = billboard
 end
@@ -2223,7 +2372,7 @@ local function updateTargetIndicator(status)
     if not frame then return end
     local text = frame:FindFirstChild("TextLabel")
     if not text then return end
-    
+
     local statusConfig = {
         attacking = {Color3.fromRGB(0, 255, 0), "⚔️ ATTACKING"},
         invisible = {Color3.fromRGB(128, 0, 255), "👻 INVISIBLE"},
@@ -2249,11 +2398,11 @@ end
 local function createDebugGui()
     local playerGui = player:WaitForChild("PlayerGui")
     if debugGui then debugGui:Destroy() end
-    
+
     debugGui = Instance.new("ScreenGui")
     debugGui.Name = "AltFollowDebug"
     debugGui.ResetOnSpawn = false
-    
+
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(0, 400, 0, 320)
     frame.Position = UDim2.new(0, 10, 0, 10)
@@ -2262,7 +2411,7 @@ local function createDebugGui()
     frame.BorderSizePixel = 2
     frame.BorderColor3 = Color3.new(0, 1, 1)
     frame.Parent = debugGui
-    
+
     local textLabel = Instance.new("TextLabel")
     textLabel.Name = "DebugText"
     textLabel.Size = UDim2.new(1, -10, 1, -10)
@@ -2275,7 +2424,7 @@ local function createDebugGui()
     textLabel.Font = Enum.Font.Code
     textLabel.Text = "Debug Info"
     textLabel.Parent = frame
-    
+
     debugGui.Parent = playerGui
 end
 
@@ -2320,16 +2469,16 @@ local function moveWhileSpectating(moveToward)
     local myRoot = getRoot(player)
     local targetRoot = getRoot(targetPlayer)
     if not myRoot or not targetRoot then return end
-    
+
     local myPos = myRoot.Position
     local targetPos = targetRoot.Position
     local camCFrame = Camera.CFrame
-    
+
     local altInCamSpace = camCFrame:PointToObjectSpace(myPos)
     local targetInCamSpace = camCFrame:PointToObjectSpace(targetPos)
     local dirInCamSpace = (targetInCamSpace - altInCamSpace).Unit
     if not moveToward then dirInCamSpace = -dirInCamSpace end
-    
+
     stopAllMovementKeys()
     if dirInCamSpace.Z < -0.2 then pulseMovementKey(Enum.KeyCode.W) end
     if dirInCamSpace.Z > 0.2 then pulseMovementKey(Enum.KeyCode.S) end
@@ -2356,213 +2505,17 @@ local function stopCameraUpdate()
 end
 
 -- =====================================================
--- SMOOTH VERTICAL FLIGHT LOGIC (NEW)
--- =====================================================
-
--- Determine if we should continue current vertical direction (ignore small changes)
-local function shouldContinueVerticalDirection(currentYDiff)
-    local now = tick()
-    
-    -- If height difference is very small, likely jumping/maneuvering - continue current direction
-    if math.abs(currentYDiff) < CONFIG.SMALL_HEIGHT_CHANGE then
-        if now - verticalDirectionStartTime < CONFIG.VERTICAL_DIRECTION_HOLD_TIME then
-            return lastVerticalDirection
-        end
-    end
-    
-    -- Determine new direction
-    local newDirection = 0
-    if currentYDiff > CONFIG.SMALL_HEIGHT_CHANGE then
-        newDirection = 1  -- Need to go UP
-    elseif currentYDiff < -CONFIG.SMALL_HEIGHT_CHANGE then
-        newDirection = -1  -- Need to go DOWN
-    end
-    
-    -- If direction changed, reset timer
-    if newDirection ~= lastVerticalDirection then
-        lastVerticalDirection = newDirection
-        verticalDirectionStartTime = now
-    end
-    
-    return newDirection
-end
-
--- Calculate angled flight direction (not pure horizontal, slight vertical angle)
-local function getAngledFlightDirection(myPos, targetPos)
-    local fullVector = targetPos - myPos
-    local horizontalDir = Vector3.new(fullVector.X, 0, fullVector.Z)
-    local horizontalDist = horizontalDir.Magnitude
-    local verticalDiff = targetPos.Y - myPos.Y  -- Positive = target above
-    local absVerticalDiff = math.abs(verticalDiff)
-    
-    -- Ensure we have a valid horizontal direction (fallback if directly above/below)
-    if horizontalDist < 1 then
-        horizontalDir = Vector3.new(1, 0, 0)
-        horizontalDist = 1
-    end
-    local horizontalUnit = horizontalDir.Unit
-    
-    -- Use vertical direction persistence (ignore target jumping)
-    local persistedDirection = shouldContinueVerticalDirection(verticalDiff)
-    
-    -- If target is jumping/small movement AND we have a persisted direction, use it
-    if absVerticalDiff < CONFIG.SMALL_HEIGHT_CHANGE and persistedDirection ~= 0 then
-        -- Continue previous vertical direction with angled flight
-        local verticalRatio = persistedDirection * CONFIG.ANGLED_FLIGHT_RATIO
-        if persistedDirection < 0 and isTerrainBelow() then
-            verticalRatio = 0
-        end
-        local angledDirection = (horizontalUnit + Vector3.new(0, verticalRatio, 0)).Unit
-        return angledDirection, "ANGLED_PERSIST"
-    end
-    
-    -- If vertical diff is small and no persisted direction, fly horizontal
-    if absVerticalDiff < CONFIG.SMALL_HEIGHT_CHANGE then
-        return horizontalUnit, "HORIZONTAL"
-    end
-    
-    -- If vertical separation exceeds max (80 studs), prioritize vertical movement
-    if absVerticalDiff > CONFIG.MAX_VERTICAL_SEPARATION then
-        if verticalDiff > 0 then
-            return (horizontalUnit * 0.4 + Vector3.new(0, 0.9, 0)).Unit, "STEEP_UP"
-        else
-            if isTerrainBelow() then
-                return horizontalUnit, "TERRAIN_BLOCK"
-            end
-            return (horizontalUnit * 0.4 + Vector3.new(0, -0.9, 0)).Unit, "STEEP_DOWN"
-        end
-    end
-    
-    -- If horizontal distance is small (< 100 studs) but vertical > 10, go steep
-    if horizontalDist < CONFIG.HORIZONTAL_TOO_SMALL and absVerticalDiff > 10 then
-        if verticalDiff > 0 then
-            return (horizontalUnit * 0.3 + Vector3.new(0, 0.95, 0)).Unit, "VERTICAL_UP"
-        else
-            if isTerrainBelow() then
-                return horizontalUnit, "TERRAIN_BLOCK"
-            end
-            return (horizontalUnit * 0.3 + Vector3.new(0, -0.95, 0)).Unit, "VERTICAL_DOWN"
-        end
-    end
-    
-    -- Normal case: fly with angle toward target (horizontal >= 100 studs, vertical > 8 studs)
-    -- ANGLED_FLIGHT_RATIO of 0.5 means for every 1 unit horizontal, add 0.5 vertical
-    -- This creates roughly a 26 degree angle
-    local verticalRatio = CONFIG.ANGLED_FLIGHT_RATIO
-    if verticalDiff < 0 then
-        -- Going down - check terrain
-        if isTerrainBelow() then
-            verticalRatio = 0
-        else
-            verticalRatio = -CONFIG.ANGLED_FLIGHT_RATIO
-        end
-    end
-    
-    -- Create angled direction: horizontal unit + vertical component
-    local angledDirection = (horizontalUnit + Vector3.new(0, verticalRatio, 0)).Unit
-    return angledDirection, "ANGLED"
-end
-
--- Smart camera positioning using angled flight
-local function pointCameraForMovement(myPos, targetPos)
-    local direction, flightType = getAngledFlightDirection(myPos, targetPos)
-    local lookTarget = myPos + direction * 50
-    
-    -- Use CFrame.lookAt with explicit up vector to prevent flipping
-    -- When looking down, the default up vector can cause issues
-    local upVector = Vector3.new(0, 1, 0)
-    
-    -- If looking nearly straight down or up, adjust up vector
-    if math.abs(direction.Y) > 0.9 then
-        upVector = Vector3.new(0, 0, -1)  -- Use Z as up when looking vertically
-    end
-    
-    Camera.CFrame = CFrame.lookAt(myPos, lookTarget, upVector)
-    return flightType
-end
-
-local function pointCameraAway(myPos, targetPos)
-    local yDiff = targetPos.Y - myPos.Y
-    local horizontalAway = (myPos - targetPos)
-    horizontalAway = Vector3.new(horizontalAway.X, 0, horizontalAway.Z)
-    
-    -- Ensure valid horizontal direction
-    if horizontalAway.Magnitude < 1 then
-        horizontalAway = Vector3.new(1, 0, 0)
-    end
-    local horizontalUnit = horizontalAway.Unit
-    
-    if math.abs(yDiff) > CONFIG.VERTICAL_THRESHOLD then
-        if yDiff > 0 then
-            -- Target above, back away by going down (but with horizontal component)
-            if isTerrainBelow() then
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + horizontalUnit * 50)
-                return "TERRAIN_BLOCK_AWAY"
-            end
-            -- Go down and away - keep horizontal component to prevent flip
-            local downAway = (horizontalUnit * 0.3 + Vector3.new(0, -0.95, 0)).Unit
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + downAway * 50, Vector3.new(0, 0, -1))
-        else
-            -- Target below, back away by going up (with horizontal component)
-            local upAway = (horizontalUnit * 0.3 + Vector3.new(0, 0.95, 0)).Unit
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + upAway * 50, Vector3.new(0, 0, -1))
-        end
-        return "VERTICAL_AWAY"
-    end
-    
-    -- Horizontal backing away
-    Camera.CFrame = CFrame.lookAt(myPos, myPos + horizontalUnit * 50)
-    return "HORIZONTAL_AWAY"
-end
-
--- =====================================================
 -- COMBAT SYSTEM
 -- =====================================================
 
 local lastCanAttackCheck = 0
 local lastCanAttackResult = false
-
-local function canAttackNow()
-    local now = tick()
-    if now - lastCanAttackCheck < 0.2 then return lastCanAttackResult end
-    lastCanAttackCheck = now
-    
-    if now - lastQClickTime < CONFIG.Q_CLICK_COOLDOWN then lastCanAttackResult = false; return false end
-    if isAttacking then lastCanAttackResult = false; return false end
-    
-    local targetPos = getTargetPosition()
-    if targetPos and isTargetUnderMap(targetPos) then lastCanAttackResult = false; return false end
-    
-    -- Sustained attack mode bypasses stamina check (we're being attacked, fight back!)
-    if not sustainedAttackMode then
-        local stamina = getStamina()
-        if not stamina or stamina < getEffectiveStaminaMin() then lastCanAttackResult = false; return false end
-    end
-    
-    -- Removed spectating requirement - can attack from any camera mode
-    if targetWasDead or targetWasInvisible then lastCanAttackResult = false; return false end
-    
-    lastCanAttackResult = true
-    return true
-end
-
--- Q has NO minimum range - can attack at any distance up to max
-local function isInAttackRange(totalDist)
-    return totalDist <= CONFIG.OPTIMAL_MAX
-end
-
--- Comfort range is where we WANT to be, not where we CAN attack
-local function isInComfortRange(totalDist)
-    return totalDist >= CONFIG.OPTIMAL_MIN and totalDist <= CONFIG.OPTIMAL_MAX
-end
-
--- Sustained attack mode tracking
 local sustainedAttackMode = false
 local sustainedDamageAccumulated = 0
 local lastDamageTime = 0
-local SUSTAINED_DAMAGE_MIN = 20        -- Min damage to trigger sustained mode
-local SUSTAINED_DAMAGE_MAX = 30        -- Max damage (filters out other sources)
-local SUSTAINED_DAMAGE_TIMEOUT = 0.5   -- Exit after 0.5s of no damage
+local SUSTAINED_DAMAGE_MIN = 20
+local SUSTAINED_DAMAGE_MAX = 30
+local SUSTAINED_DAMAGE_TIMEOUT = 0.5
 
 local function checkDamageTaken()
     local currentHealth = getAltHealth()
@@ -2579,24 +2532,21 @@ end
 local function updateSustainedAttackMode()
     local damageTaken = checkDamageTaken()
     local currentTime = tick()
-    
+
     if damageTaken > 0 then
         sustainedDamageAccumulated = sustainedDamageAccumulated + damageTaken
         lastDamageTime = currentTime
-        
-        -- Enter sustained attack mode if damage is in range (20-30 HP)
-        -- This filters out other damage sources (fall damage, etc)
+
         if sustainedDamageAccumulated >= SUSTAINED_DAMAGE_MIN and sustainedDamageAccumulated <= SUSTAINED_DAMAGE_MAX then
             sustainedAttackMode = true
         end
     end
-    
-    -- Exit sustained mode after 0.5s of no damage
+
     if sustainedAttackMode and (currentTime - lastDamageTime) > SUSTAINED_DAMAGE_TIMEOUT then
         sustainedAttackMode = false
         sustainedDamageAccumulated = 0
     end
-    
+
     return sustainedAttackMode
 end
 
@@ -2605,6 +2555,36 @@ local function resetDamageTracking()
     sustainedAttackMode = false
     sustainedDamageAccumulated = 0
     lastDamageTime = 0
+end
+
+local function canAttackNow()
+    local now = tick()
+    if now - lastCanAttackCheck < 0.2 then return lastCanAttackResult end
+    lastCanAttackCheck = now
+
+    if now - lastQClickTime < CONFIG.Q_CLICK_COOLDOWN then lastCanAttackResult = false; return false end
+    if isAttacking then lastCanAttackResult = false; return false end
+
+    local targetPos = getTargetPosition()
+    if targetPos and isTargetUnderMap(targetPos) then lastCanAttackResult = false; return false end
+
+    if not sustainedAttackMode then
+        local stamina = getStamina()
+        if not stamina or stamina < getEffectiveStaminaMin() then lastCanAttackResult = false; return false end
+    end
+
+    if targetWasDead or targetWasInvisible then lastCanAttackResult = false; return false end
+
+    lastCanAttackResult = true
+    return true
+end
+
+local function isInAttackRange(totalDist)
+    return totalDist <= CONFIG.OPTIMAL_MAX
+end
+
+local function isInComfortRange(totalDist)
+    return totalDist >= CONFIG.OPTIMAL_MIN and totalDist <= CONFIG.OPTIMAL_MAX
 end
 
 local function checkEmergencyDefense(myPos, targetPos)
@@ -2630,7 +2610,7 @@ local function performEmergencyDefense(myPos, targetPos, interruptedTask)
     if not spectating then startSpectating() end
     isAttacking = true
     updateTargetIndicator("attacking")
-    
+
     spawn(function()
         moveMouseToCenter()
         wait(0.03)
@@ -2654,61 +2634,60 @@ local function performQClickAttack()
     local currentTime = tick()
     if currentTime - lastQClickTime < CONFIG.Q_CLICK_COOLDOWN then return false end
     if isAttacking then return false end
-    
+
     local myRoot = getRoot(player)
     local targetRoot = getRoot(targetPlayer)
     if not myRoot or not targetRoot then return false end
-    
+
     local myPos = myRoot.Position
     local targetPos = targetRoot.Position
-    local fullVector = targetPos - myPos
-    local horizontalDistance = Vector3.new(fullVector.X, 0, fullVector.Z).Magnitude
-    
+    local distance = (targetPos - myPos).Magnitude
+
     if isTargetUnderMap(targetPos) then updateTargetIndicator("blocked"); return false end
-    
-    -- Shield check
+
     local canGrab, shieldStatus = canGrabTarget(myPos, targetPos)
     if not canGrab then
         updateTargetIndicator("blocked")
         return false
     end
     
+    -- Check if target is trapped inside earth/boulder
+    if isTargetTrappedInEarth(targetPos) then
+        updateTargetIndicator("blocked")
+        return false
+    end
+
     if cachedTargetInWater then
         local validPos = isValidUnderwaterAttackPosition(myPos, targetPos)
         if not validPos then return false end
     end
-    
+
     local hasLOS = hasCompleteLineOfSight(myRoot, targetRoot)
     if not hasLOS and isInRiverBounds(targetPos) then
         if canGrabRiverTarget(myPos, targetPos) then hasLOS = true end
     end
     if not hasLOS then updateTargetIndicator("blocked"); return false end
-    
-    -- Determine toss direction based on HORIZONTAL distance
-    -- Close to OPTIMAL_MAX → pull back (click below)
-    -- Otherwise → push forward (click above) or center
-    local pullThreshold = CONFIG.OPTIMAL_MAX - 5  -- Start pulling when within 5 studs of max
-    local shouldPull = horizontalDistance >= pullThreshold
-    
+
+    local pullThreshold = CONFIG.OPTIMAL_MAX - 5
+    local shouldPull = distance >= pullThreshold
+
     isAttacking = true
     updateTargetIndicator("attacking")
-    
+
     spawn(function()
-        -- Point camera at target for accurate toss
         Camera.CameraType = Enum.CameraType.Scriptable
         Camera.CFrame = CFrame.lookAt(myPos, targetPos)
-        
+
         wait(0.05)
         holdKey(Enum.KeyCode.Q)
         wait(0.2)
-        
-        -- Use directional click based on distance
+
         if shouldPull then
-            sendClickBelowCenter()  -- Pull toward us
+            sendClickBelowCenter()
         else
-            sendClickAboveCenter()  -- Push away (keeps in range)
+            sendClickAboveCenter()
         end
-        
+
         wait(0.3)
         releaseKey(Enum.KeyCode.Q)
         isAttacking = false
@@ -2731,7 +2710,7 @@ local function calculateMovementAndMode(myPos, targetPos)
     local horizontalDistance = horizontalVector.Magnitude
     local verticalDiff = fullVector.Y
     local totalDistance = fullVector.Magnitude
-    
+
     local newMode = currentMode
     if flightDisabledForStamina then
         newMode = "STAMINA_REGEN"
@@ -2742,593 +2721,21 @@ local function calculateMovementAndMode(myPos, targetPos)
     elseif isInComfortRange(totalDistance) then
         newMode = "ATTACK"
     else
-        -- Too close but can still attack (Q has no min range)
         newMode = "TOO_CLOSE"
     end
-    
+
     return newMode, horizontalDistance, verticalDiff, horizontalVector, totalDistance
 end
 
 -- =====================================================
--- MAIN FOLLOW LOOP
--- =====================================================
-
-local movementLoop = nil
-
-local function startMovementLoop()
-    movementLoop = RunService.Heartbeat:Connect(function(deltaTime)
-        if not following or not targetPlayer then return end
-        if altIsDead then return end
-        
-        local myRoot = getRoot(player)
-        local targetPos = getTargetPosition()
-        if not myRoot or not targetPos then return end
-        local myPos = myRoot.Position
-        
-        -- Tab-out detection
-        local currentFrameTime = tick()
-        if lastFrameTime > 0 then
-            local frameGap = currentFrameTime - lastFrameTime
-            if frameGap > 0.5 then
-                for keyName in pairs(activeKeyThreads) do activeKeyThreads[keyName] = nil end
-                movementPulseTimer = CONFIG.MOVEMENT_PULSE_RATE
-            end
-        end
-        lastFrameTime = currentFrameTime
-        
-        manageFlightStamina()
-        
-        -- Update sustained attack mode (20+ HP damage triggers it)
-        updateSustainedAttackMode()
-        
-        -- Underwater detection
-        local currentTime = tick()
-        if currentTime - lastUnderwaterCheck > 0.25 then
-            lastUnderwaterCheck = currentTime
-            local wasUnderwater = isUnderwater
-            isUnderwater = checkUnderwater()
-            cachedTargetInWater = isTargetUnderwater()
-            if not isUnderwater and wasUnderwater then
-                airRemaining = CONFIG.UNDERWATER_MAX_TIME
-                resurfaceStarted = false
-            end
-        end
-        
-        if isUnderwater then
-            airRemaining = airRemaining - deltaTime
-        else
-            airRemaining = CONFIG.UNDERWATER_MAX_TIME
-            resurfaceStarted = false
-        end
-        
-        if spectating and not canEnterCombatMode() then stopSpectating() end
-        
-        -- Forced resurface
-        if isUnderwater and airRemaining <= 0 then
-            if not resurfaceStarted then
-                resurfaceStarted = true
-                resetDamageTracking()
-            end
-            if checkEmergencyDefense(myPos, targetPos) then
-                performEmergencyDefense(myPos, targetPos, "RESURFACE")
-            else
-                if spectating then stopSpectating() end
-            end
-            if not isAttacking then tryResurface() end
-            movementPulseTimer = movementPulseTimer + deltaTime
-            return
-        end
-        
-        -- Target underwater handling (river)
-        if cachedTargetInWater and not targetWasDead then
-            -- Check if target is in river zone and needs dive approach
-            if shouldDiveForRiverTarget(myPos, targetPos) then
-                -- Alt is above water, target is below - need to dive down first
-                if spectating then stopSpectating() end
-                ensureFlight()
-                Camera.CameraType = Enum.CameraType.Scriptable
-                
-                -- Get dive entry point (above target's position at surface level)
-                local divePoint = getRiverDivePoint(myPos, targetPos)
-                local horizDistToDive = (Vector3.new(divePoint.X, myPos.Y, divePoint.Z) - myPos).Magnitude
-                
-                if horizDistToDive > 20 then
-                    -- Fly horizontally toward dive point first
-                    Camera.CFrame = CFrame.lookAt(myPos, divePoint)
-                    if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                        movementPulseTimer = 0
-                        pulseCurveAcceleration(myPos, divePoint)
-                    end
-                else
-                    -- Close enough horizontally - dive straight down
-                    Camera.CFrame = CFrame.lookAt(myPos, myPos + Vector3.new(0, -20, 0), Vector3.new(0, 0, -1))
-                    if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                        movementPulseTimer = 0
-                        pulseMovementKey(Enum.KeyCode.W)
-                    end
-                end
-                movementPulseTimer = movementPulseTimer + deltaTime
-                return
-            elseif not isUnderwater then
-                -- Target in water but alt not yet underwater (generic case)
-                if spectating then stopSpectating() end
-                ensureFlight()
-                Camera.CameraType = Enum.CameraType.Scriptable
-                Camera.CFrame = CFrame.lookAt(myPos, targetPos)
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    pulseCurveAcceleration(myPos, targetPos)
-                end
-                movementPulseTimer = movementPulseTimer + deltaTime
-                return
-            else
-                -- Alt is underwater - reposition if needed, then attack
-                -- For river targets, alt must stay underwater to grab
-                if isTargetInRiverZone(targetPos) and targetPos.Y <= CONFIG.RIVER_SURFACE_Y then
-                    -- Target is underwater in river - alt must be too
-                    local validPos = isValidUnderwaterAttackPosition(myPos, targetPos)
-                    if not validPos then
-                        if spectating then stopSpectating() end
-                        local repoDir = getUnderwaterRepositionDirection(myPos, targetPos)
-                        Camera.CameraType = Enum.CameraType.Scriptable
-                        Camera.CFrame = CFrame.lookAt(myPos, myPos + repoDir * 20)
-                        if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                            movementPulseTimer = 0
-                            pulseMovementKey(Enum.KeyCode.W)
-                        end
-                        movementPulseTimer = movementPulseTimer + deltaTime
-                    end
-                else
-                    -- Generic underwater positioning
-                    local validPos = isValidUnderwaterAttackPosition(myPos, targetPos)
-                    if not validPos then
-                        if spectating then stopSpectating() end
-                        local repoDir = getUnderwaterRepositionDirection(myPos, targetPos)
-                        Camera.CameraType = Enum.CameraType.Scriptable
-                        Camera.CFrame = CFrame.lookAt(myPos, myPos + repoDir * 20)
-                        if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                            movementPulseTimer = 0
-                            pulseMovementKey(Enum.KeyCode.W)
-                        end
-                        movementPulseTimer = movementPulseTimer + deltaTime
-                    end
-                end
-            end
-        end
-        
-        -- Target status check
-        if currentTime - lastTargetCheck > CONFIG.TARGET_CHECK_RATE then
-            lastTargetCheck = currentTime
-            local alive = isTargetAlive()
-            local invisible = isTargetInvisible()
-            
-            if not alive and not targetWasDead then
-                targetWasDead = true
-                stopSpectating()
-                updateTargetIndicator("dead")
-                hasSentTaunt = false
-                tauntPauseActive = false
-                -- Save body position for walking away
-                lastBodyPosition = targetPos
-                -- Pass current distance to scheduleTaunt
-                local deathDistance = targetPos and (targetPos - myPos).Magnitude or 999
-                scheduleTaunt(deathDistance)
-            elseif alive and targetWasDead then
-                targetWasDead = false
-                stoppedFlightForDeath = false
-                hasSentTaunt = false
-                tauntScheduled = false
-                tauntPauseActive = false
-                lastBodyPosition = nil
-                createTargetIndicator()
-            end
-            
-            if invisible and not targetWasInvisible then
-                targetWasInvisible = true
-                updateTargetIndicator("invisible")
-            elseif not invisible and targetWasInvisible then
-                targetWasInvisible = false
-                updateTargetIndicator("normal")
-            end
-        end
-        
-        -- Under map
-        if isTargetUnderMap(targetPos) then
-            currentMode = "WAITING"
-            if spectating then stopSpectating() end
-            doRandomWalk()
-            return
-        end
-        
-        -- Dead - walk away from body, then switch to next target
-        if targetWasDead then
-            currentMode = "WAITING"
-            if not stoppedFlightForDeath and hasFlight() then
-                toggleFlight()
-                stoppedFlightForDeath = true
-            end
-            
-            -- Pause movement while taunting
-            if tauntPauseActive then
-                movementPulseTimer = movementPulseTimer + deltaTime
-                return
-            end
-            
-            -- Calculate distance from body
-            local distFromBody = lastBodyPosition and (myPos - lastBodyPosition).Magnitude or 0
-            local walkedAwayEnough = distFromBody > 30
-            
-            -- After taunt sent (or no taunt scheduled), try switching to next target
-            if walkedAwayEnough and (hasSentTaunt or not tauntScheduled) then
-                if switchToNextTarget() then
-                    -- Successfully switched to next target
-                    ensureFlight()
-                    return
-                end
-                -- No alive targets - fall through to random walk
-            end
-            
-            if isUnderwater and airRemaining <= 0 then
-                tryResurface()
-            elseif not walkedAwayEnough and lastBodyPosition then
-                -- Still need to walk away from body
-                local awayFromBody = myPos - lastBodyPosition
-                if awayFromBody.Magnitude > 0.1 then
-                    awayFromBody = Vector3.new(awayFromBody.X, 0, awayFromBody.Z).Unit
-                else
-                    awayFromBody = Vector3.new(1, 0, 0)
-                end
-                
-                Camera.CameraType = Enum.CameraType.Scriptable
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + awayFromBody * 20)
-                
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    pulseMovementKey(Enum.KeyCode.W)
-                end
-            else
-                -- Walked away and no alive targets - random walk while waiting
-                doRandomWalk()
-            end
-            movementPulseTimer = movementPulseTimer + deltaTime
-            return
-        end
-        
-        -- Invisible - retreat to 300 studs, stay within 100 stud range
-        if targetWasInvisible then
-            currentMode = "RETREAT"
-            if spectating then stopSpectating() end
-            ensureFlight()
-            Camera.CameraType = Enum.CameraType.Scriptable
-            
-            local distToTarget = (targetPos - myPos).Magnitude
-            local awayDir = (myPos - targetPos)
-            if awayDir.Magnitude > 0.1 then awayDir = awayDir.Unit else awayDir = Vector3.new(1, 0, 0) end
-            
-            -- Calculate retreat zone (300 studs away, +/- 100)
-            local minRetreat = CONFIG.INVISIBILITY_RETREAT_DIST - CONFIG.INVISIBILITY_STAY_RANGE  -- 200
-            local maxRetreat = CONFIG.INVISIBILITY_RETREAT_DIST + CONFIG.INVISIBILITY_STAY_RANGE  -- 400
-            
-            if distToTarget < minRetreat then
-                -- Too close - fly away
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + awayDir * 50)
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    pulseMovementKey(Enum.KeyCode.W)
-                end
-            elseif distToTarget > maxRetreat then
-                -- Too far - fly toward (but not too close)
-                Camera.CFrame = CFrame.lookAt(myPos, targetPos)
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    pulseMovementKey(Enum.KeyCode.W)
-                end
-            else
-                -- In range - hover/orbit
-                local orbitDir = awayDir:Cross(Vector3.new(0, 1, 0)).Unit
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + orbitDir * 50)
-            end
-            
-            movementPulseTimer = movementPulseTimer + deltaTime
-            return
-        end
-        
-        -- Check if target is blocked by terrain below (retreat similar to invisible)
-        if isTargetBlockedByTerrainBelow(myPos, targetPos) then
-            currentMode = "RETREAT"
-            if spectating then stopSpectating() end
-            ensureFlight()
-            Camera.CameraType = Enum.CameraType.Scriptable
-            
-            local distToTarget = (targetPos - myPos).Magnitude
-            local awayDir = (myPos - targetPos)
-            if awayDir.Magnitude > 0.1 then awayDir = awayDir.Unit else awayDir = Vector3.new(1, 0, 0) end
-            
-            -- Retreat 100 studs, stay within 100 stud range
-            local minRetreat = CONFIG.TERRAIN_BLOCK_RETREAT_DIST
-            local maxRetreat = CONFIG.TERRAIN_BLOCK_RETREAT_DIST * 2
-            
-            if distToTarget < minRetreat then
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + awayDir * 50)
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    pulseMovementKey(Enum.KeyCode.W)
-                end
-            elseif distToTarget > maxRetreat then
-                Camera.CFrame = CFrame.lookAt(myPos, targetPos)
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    pulseMovementKey(Enum.KeyCode.W)
-                end
-            end
-            
-            movementPulseTimer = movementPulseTimer + deltaTime
-            return
-        end
-        
-        local newMode, hDist, vDiff, hVector, totalDist = calculateMovementAndMode(myPos, targetPos)
-        
-        -- Stuck detection
-        local currentStuckTime = updateStuckDetection(myPos, deltaTime)
-        if not isUnsticking and currentStuckTime >= CONFIG.STUCK_TIME_THRESHOLD then
-            startUnsticking(myPos, targetPos)
-        end
-        if isUnsticking and tick() >= unstickEndTime then
-            isUnsticking = false
-            unstickDirection = nil
-            stuckTimer = 0
-        end
-        
-        -- Attack priority (always attack in range, or if sustained attack mode active)
-        local attackPriorityTriggered = false
-        local shouldAttack = isInAttackRange(totalDist) and canAttackNow()
-        
-        -- Sustained attack mode - attack even more aggressively
-        if sustainedAttackMode and canAttackNow() and totalDist <= CONFIG.COMBAT_ZONE then
-            shouldAttack = true
-        end
-        
-        if shouldAttack then
-            attackPriorityTriggered = true
-            performQClickAttack()
-        end
-        
-        -- Unstick mode
-        if isUnsticking and unstickDirection and not attackPriorityTriggered then
-            if spectating then stopSpectating() end
-            ensureFlight()
-            Camera.CameraType = Enum.CameraType.Scriptable
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + unstickDirection * 50)
-            if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                movementPulseTimer = 0
-                pulseMovementKey(Enum.KeyCode.W)
-            end
-            movementPulseTimer = movementPulseTimer + deltaTime
-            return
-        end
-        
-        -- Mode transitions
-        if newMode ~= currentMode then
-            stopAllMovementKeys()
-            movementPulseTimer = CONFIG.MOVEMENT_PULSE_RATE
-            currentMode = newMode
-        end
-        
-        -- Force spectate in combat zone
-        if totalDist <= CONFIG.COMBAT_ZONE and not spectating then
-            startSpectating()
-        elseif totalDist > CONFIG.COMBAT_ZONE and spectating then
-            stopSpectating()
-        end
-        
-        movementPulseTimer = movementPulseTimer + deltaTime
-        local flightMode = "HORIZONTAL"
-        
-        -- Execute mode behavior
-        if currentMode == "STAMINA_REGEN" then
-            local stamina = getStamina() or 0
-            local effectiveMin = getEffectiveStaminaMin()
-            
-            -- Stamina too low to attack - back away from target
-            if stamina < effectiveMin then
-                -- Exit spectating for camera control
-                if spectating then stopSpectating() end
-                
-                Camera.CameraType = Enum.CameraType.Scriptable
-                -- Point camera away from target
-                local awayDir = (myPos - targetPos)
-                awayDir = Vector3.new(awayDir.X, 0, awayDir.Z)  -- Horizontal only
-                if awayDir.Magnitude < 1 then awayDir = Vector3.new(1, 0, 0) end
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + awayDir.Unit * 50)
-                
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    pulseMovementKey(Enum.KeyCode.W)  -- Walk away
-                    tryRandomJump()  -- Jump to get over obstacles
-                end
-                flightMode = "RETREAT_LOW_STAM"
-            else
-                -- Stamina enough to attack - maintain optimal range
-                -- Enter spectating when in combat zone for aiming
-                if totalDist <= CONFIG.COMBAT_ZONE and not spectating then
-                    startSpectating()
-                elseif totalDist > CONFIG.COMBAT_ZONE and spectating then
-                    stopSpectating()
-                end
-                
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    
-                    if totalDist > CONFIG.OPTIMAL_MAX then
-                        -- Too far - walk toward target
-                        if spectating then
-                            moveWhileSpectating(true)
-                        else
-                            Camera.CameraType = Enum.CameraType.Scriptable
-                            local towardDir = Vector3.new(hVector.X, 0, hVector.Z).Unit
-                            Camera.CFrame = CFrame.lookAt(myPos, myPos + towardDir * 50)
-                            pulseMovementKey(Enum.KeyCode.W)
-                        end
-                        tryRandomJump()  -- Jump to get over hills
-                        flightMode = "APPROACH_WALK"
-                    elseif totalDist < CONFIG.OPTIMAL_MIN then
-                        -- Too close - back away to optimal mid
-                        if spectating then
-                            moveWhileSpectating(false)
-                        else
-                            Camera.CameraType = Enum.CameraType.Scriptable
-                            local awayDir = Vector3.new(-hVector.X, 0, -hVector.Z).Unit
-                            Camera.CFrame = CFrame.lookAt(myPos, myPos + awayDir * 50)
-                            pulseMovementKey(Enum.KeyCode.W)
-                        end
-                        tryCombatJump()  -- Combat jump to throw off aim
-                        flightMode = "BACKUP_WALK"
-                    elseif totalDist < CONFIG.OPTIMAL_MID then
-                        -- In range but below mid - back up a bit
-                        if spectating then
-                            moveWhileSpectating(false)
-                        end
-                        tryCombatJump()  -- Combat jump to throw off aim
-                        flightMode = "ADJUST_WALK"
-                    else
-                        -- In optimal range - attack!
-                        tryCombatJump()  -- Combat jump to throw off aim
-                        if not targetWasInvisible and not isAttacking then
-                            performQClickAttack()
-                        end
-                        flightMode = "ATTACK_WALK"
-                    end
-                end
-            end
-            
-        elseif currentMode == "TOO_CLOSE" then
-            ensureFlight()
-            
-            -- Still attack while backing away (Q has no min range)
-            if canAttackNow() and not targetWasInvisible and not isAttacking then
-                performQClickAttack()
-            end
-            
-            -- Back away to comfort range
-            if spectating then
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    moveWhileSpectating(false)
-                end
-            else
-                Camera.CameraType = Enum.CameraType.Scriptable
-                flightMode = pointCameraAway(myPos, targetPos)
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    pulseMovementKey(Enum.KeyCode.W)
-                end
-            end
-            
-        elseif currentMode == "ATTACK" then
-            ensureFlight()
-            if justAttacked then
-                if totalDist < CONFIG.OPTIMAL_MID then
-                    if spectating then
-                        if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                            movementPulseTimer = 0
-                            moveWhileSpectating(false)
-                        end
-                    else
-                        Camera.CameraType = Enum.CameraType.Scriptable
-                        flightMode = pointCameraAway(myPos, targetPos)
-                        if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                            movementPulseTimer = 0
-                            pulseMovementKey(Enum.KeyCode.W)
-                        end
-                    end
-                else
-                    justAttacked = false
-                end
-            else
-                if not targetWasInvisible and not isAttacking then
-                    performQClickAttack()
-                end
-            end
-            
-        elseif currentMode == "APPROACH" then
-            ensureFlight()
-            if spectating then
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    moveWhileSpectating(true)
-                end
-            else
-                Camera.CameraType = Enum.CameraType.Scriptable
-                flightMode = pointCameraForMovement(myPos, targetPos)
-                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                    movementPulseTimer = 0
-                    local curved, curveType = pulseCurveAcceleration(myPos, targetPos)
-                    if curved then flightMode = flightMode .. "+" .. curveType end
-                end
-            end
-            
-        elseif currentMode == "TRAVEL" then
-            ensureFlight()
-            Camera.CameraType = Enum.CameraType.Scriptable
-            
-            -- Use new angled flight logic
-            flightMode = pointCameraForMovement(myPos, targetPos)
-            
-            if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
-                movementPulseTimer = 0
-                local curved, curveType = pulseCurveAcceleration(myPos, targetPos)
-                if curved then flightMode = flightMode .. "+" .. curveType end
-            end
-        end
-        
-        -- Debug (protected to avoid spam errors)
-        pcall(function()
-            local stamina = getStamina() or 0
-            local attackCooldown = math.max(0, CONFIG.Q_CLICK_COOLDOWN - (tick() - lastQClickTime))
-            local queueNames = getSecondaryTargetNames()
-            local queueStr = #queueNames > 0 and table.concat(queueNames, "→") or "none"
-            updateDebug(string.format(
-                [[Target: %s
-Mode: %s | Spectating: %s
-Distance: H=%.1f V=%.1f Total=%.1f
-Optimal: %d-%d studs
-Status: %s | Queue: %s
-Stamina: %d | Air: %.1fs
-Attack CD: %.1fs | Sustained: %s
-Flight: %s (%s)]],
-                targetPlayer and targetPlayer.Name or "None",
-                currentMode or "IDLE",
-                tostring(spectating),
-                hDist or 0, vDiff or 0, totalDist or 0,
-                CONFIG.OPTIMAL_MIN, CONFIG.OPTIMAL_MAX,
-                targetWasDead and "DEAD" or (targetWasInvisible and "INVISIBLE" or "ALIVE"),
-                queueStr,
-                stamina,
-                airRemaining or 0,
-                attackCooldown,
-                tostring(sustainedAttackMode),
-                tostring(hasFlight()),
-                flightMode or "NONE"
-            ))
-        end)
-    end)
-end
-
-local function stopMovementLoop()
-    if movementLoop then movementLoop:Disconnect(); movementLoop = nil end
-    releaseKey(Enum.KeyCode.Q)
-    isAttacking = false
-end
-
--- =====================================================
--- TARGET SELECTION
+-- TARGET SELECTION + MULTI-TARGET
 -- =====================================================
 
 local function getClosestPlayerToCursor()
     local closest = nil
     local minDist = math.huge
     local mousePos = UserInputService:GetMouseLocation()
-    
+
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= player then
             local root = getRoot(plr)
@@ -3349,10 +2756,6 @@ local function getClosestPlayerToCursor()
     return closest
 end
 
--- =====================================================
--- MULTI-TARGET SYSTEM (M key)
--- =====================================================
-
 local function isSecondaryTargetById(userId)
     for i, uid in ipairs(secondaryTargetUserIds) do
         if uid == userId then
@@ -3360,11 +2763,6 @@ local function isSecondaryTargetById(userId)
         end
     end
     return false, 0
-end
-
-local function isSecondaryTarget(plr)
-    if not plr then return false, 0 end
-    return isSecondaryTargetById(plr.UserId)
 end
 
 local function getPlayerByUserId(userId)
@@ -3378,17 +2776,12 @@ end
 
 local function addSecondaryTarget(plr)
     if not plr then return false end
-    if targetPlayer and plr.UserId == targetPlayer.UserId then return false end  -- Can't add primary as secondary
-    
-    -- Check if already in list
+    if targetPlayer and plr.UserId == targetPlayer.UserId then return false end
     local exists, _ = isSecondaryTargetById(plr.UserId)
     if exists then return false end
-    
-    -- Check if we have room
     if #secondaryTargetUserIds >= MAX_SECONDARY_TARGETS then
         return false
     end
-    
     table.insert(secondaryTargetUserIds, plr.UserId)
     print("Added secondary target #" .. #secondaryTargetUserIds .. ": " .. plr.Name)
     return true
@@ -3396,7 +2789,6 @@ end
 
 local function removeSecondaryTarget(plr)
     if not plr then return false end
-    
     local exists, index = isSecondaryTargetById(plr.UserId)
     if exists then
         table.remove(secondaryTargetUserIds, index)
@@ -3406,19 +2798,9 @@ local function removeSecondaryTarget(plr)
     return false
 end
 
-local function removeSecondaryTargetById(userId)
-    local exists, index = isSecondaryTargetById(userId)
-    if exists then
-        table.remove(secondaryTargetUserIds, index)
-        return true
-    end
-    return false
-end
-
 local function toggleSecondaryTarget(plr)
     if not plr then return end
-    
-    local exists, _ = isSecondaryTarget(plr)
+    local exists, _ = isSecondaryTargetById(plr.UserId)
     if exists then
         removeSecondaryTarget(plr)
     else
@@ -3430,61 +2812,37 @@ local function toggleSecondaryTarget(plr)
     end
 end
 
-local function getNextTarget()
-    -- Get next available secondary target (by UserId, persists across rejoin)
-    -- Only returns ALIVE players
-    local checkedCount = 0
-    local totalTargets = #secondaryTargetUserIds
-    
-    while #secondaryTargetUserIds > 0 and checkedCount < totalTargets do
-        local nextUserId = secondaryTargetUserIds[1]
-        local nextPlayer = getPlayerByUserId(nextUserId)
-        
-        -- Must be in game, have root, AND be alive
-        if nextPlayer and nextPlayer.Parent and getRoot(nextPlayer) and isPlayerAlive(nextPlayer) then
-            -- Valid alive player found - remove from queue and return
-            table.remove(secondaryTargetUserIds, 1)
-            return nextPlayer
-        else
-            -- Player dead, offline, or not loaded - move to back of queue
-            table.remove(secondaryTargetUserIds, 1)
-            table.insert(secondaryTargetUserIds, nextUserId)
-            checkedCount = checkedCount + 1
-        end
+local function getNextTarget(myPos)
+    -- Find the lowest HP secondary target within range
+    -- Like "your friend told you about someone" - you only see them if within 140 studs
+    if #secondaryTargetUserIds == 0 then
+        return nil
     end
-    return nil  -- No valid alive targets currently available
-end
-
-local function switchToNextTarget()
-    -- Try secondary targets first (only returns alive players)
-    local nextTarget = getNextTarget()
     
-    -- If no secondaries available, try original primary (must also be alive)
-    if not nextTarget and originalPrimaryUserId then
-        local originalPrimary = getPlayerByUserId(originalPrimaryUserId)
-        if originalPrimary and originalPrimary.Parent and getRoot(originalPrimary) and isPlayerAlive(originalPrimary) then
-            nextTarget = originalPrimary
-            print("Falling back to original primary: " .. originalPrimary.Name)
+    local bestTarget = nil
+    local lowestHP = math.huge
+    
+    for _, userId in ipairs(secondaryTargetUserIds) do
+        local plr = getPlayerByUserId(userId)
+        if plr and plr.Parent then
+            local root = getRoot(plr)
+            if root and isPlayerAlive(plr) then
+                -- Check if within "sight" range
+                local dist = myPos and (root.Position - myPos).Magnitude or 0
+                if not myPos or dist <= CONFIG.SECONDARY_TARGET_RANGE then
+                    -- Get their HP
+                    local hum = getHumanoid(plr)
+                    local hp = hum and hum.Health or 100
+                    if hp < lowestHP then
+                        lowestHP = hp
+                        bestTarget = plr
+                    end
+                end
+            end
         end
     end
     
-    if nextTarget then
-        targetPlayer = nextTarget
-        targetWasDead = false
-        targetWasInvisible = false
-        stoppedFlightForDeath = false
-        tauntPauseActive = false
-        lastBodyPosition = nil
-        rememberedTargetUserId = nextTarget.UserId
-        createTargetIndicator()
-        print("Switched to next target: " .. nextTarget.Name)
-        return true
-    end
-    return false  -- No alive targets, will keep checking
-end
-
-local function clearSecondaryTargets()
-    secondaryTargetUserIds = {}
+    return bestTarget
 end
 
 local function getSecondaryTargetNames()
@@ -3504,6 +2862,596 @@ local function getSecondaryTargetNames()
     return names
 end
 
+local function switchToNextTarget(myPos)
+    -- Hard reset movement/attack state before changing target (prevents carry-over)
+    if spectating then stopSpectating() end
+    stopAllMovementKeys()
+    releaseKey(Enum.KeyCode.Q)
+    releaseKey(Enum.KeyCode.Space)
+    isAttacking = false
+    resetStuckDetection()
+    movementPulseTimer = CONFIG.MOVEMENT_PULSE_RATE
+
+    -- Find lowest HP secondary within range
+    local nextTarget = getNextTarget(myPos)
+
+    if nextTarget then
+        targetPlayer = nextTarget
+        targetWasDead = false
+        targetWasInvisible = false
+        stoppedFlightForDeath = false
+        tauntPauseActive = false
+        lastBodyPosition = nil
+        onSecondaryTarget = true  -- Mark that we're on a secondary
+        createTargetIndicator()
+        print("Switched to secondary target: " .. nextTarget.Name)
+        return true
+    end
+    return false
+end
+
+-- Check if main target is back and we should switch to them
+local function checkMainTargetBack(myPos)
+    if not onSecondaryTarget then return false end
+    if not originalPrimaryUserId then return false end
+    
+    local mainPlayer = getPlayerByUserId(originalPrimaryUserId)
+    if not mainPlayer or not mainPlayer.Parent then return false end
+    
+    local mainRoot = getRoot(mainPlayer)
+    if not mainRoot then return false end
+    if not isPlayerAlive(mainPlayer) then return false end
+    
+    -- Main is alive! Check grace period
+    local now = tick()
+    if mainTargetRespawnTime == 0 then
+        -- First frame we noticed main is back
+        mainTargetRespawnTime = now
+    end
+    
+    -- Grace period: don't switch mid-kill if main JUST respawned
+    if now - mainTargetRespawnTime < CONFIG.MAIN_RESPAWN_GRACE then
+        return false  -- Still in grace period, finish current kill
+    end
+    
+    -- Switch back to main target immediately
+    if spectating then stopSpectating() end
+    stopAllMovementKeys()
+    releaseKey(Enum.KeyCode.Q)
+    isAttacking = false
+    
+    targetPlayer = mainPlayer
+    targetWasDead = false
+    targetWasInvisible = false
+    stoppedFlightForDeath = false
+    tauntPauseActive = false
+    lastBodyPosition = nil
+    onSecondaryTarget = false
+    rememberedTargetUserId = mainPlayer.UserId
+    mainTargetRespawnTime = 0  -- Reset
+    createTargetIndicator()
+    print("Main target back! Switching to: " .. mainPlayer.Name)
+    return true
+end
+
+local function clearSecondaryTargets()
+    secondaryTargetUserIds = {}
+    onSecondaryTarget = false
+end
+
+-- =====================================================
+-- MAIN FOLLOW LOOP
+-- =====================================================
+
+local movementLoop = nil
+
+local function startMovementLoop()
+    movementLoop = RunService.Heartbeat:Connect(function(deltaTime)
+        if not following or not targetPlayer then return end
+        if altIsDead then return end
+
+        local myRoot = getRoot(player)
+        local targetPos = getTargetPosition()
+        if not myRoot or not targetPos then return end
+        local myPos = myRoot.Position
+
+        local currentFrameTime = tick()
+        if lastFrameTime > 0 then
+            local frameGap = currentFrameTime - lastFrameTime
+            if frameGap > 0.5 then
+                for keyName in pairs(activeKeyThreads) do activeKeyThreads[keyName] = nil end
+                movementPulseTimer = CONFIG.MOVEMENT_PULSE_RATE
+            end
+        end
+        lastFrameTime = currentFrameTime
+
+        manageFlightStamina()
+        updateSustainedAttackMode()
+        
+        -- PRIORITY: Check if main target is back while we're on a secondary
+        if onSecondaryTarget and checkMainTargetBack(myPos) then
+            ensureFlight()
+            return  -- Switched back to main, restart loop
+        end
+
+        local currentTime = tick()
+        if currentTime - lastUnderwaterCheck > 0.25 then
+            lastUnderwaterCheck = currentTime
+            local wasUnderwater = isUnderwater
+            isUnderwater = checkUnderwater()
+            cachedTargetInWater = isTargetUnderwater()
+            if not isUnderwater and wasUnderwater then
+                airRemaining = CONFIG.UNDERWATER_MAX_TIME
+                resurfaceStarted = false
+            end
+        end
+
+        if isUnderwater then
+            airRemaining = airRemaining - deltaTime
+        else
+            airRemaining = CONFIG.UNDERWATER_MAX_TIME
+            resurfaceStarted = false
+        end
+
+        if spectating and not canEnterCombatMode() then stopSpectating() end
+        
+        -- Update river method state (check if target entered/exited river)
+        updateRiverMethodState(targetPos, currentTime)
+        
+        -- Reset river method on target death or invisible
+        if targetWasDead or targetWasInvisible then
+            riverMethodActive = false
+            targetTouchedWater = false
+            targetWaterStartTime = 0
+        end
+
+        -- RIVER METHOD: Committed underwater fighting with dolphin dive
+        -- Alt must be UNDERWATER to attack
+        -- Target can be up to 20 studs above surface (river method stays active)
+        -- Alt keeps diving back as long as river method is active
+        if riverMethodActive and not targetWasDead and not targetWasInvisible then
+            
+            -- Safety: Don't go under the map
+            local safeTargetPos = targetPos
+            if targetPos.Y < CONFIG.UNDER_MAP_Y + 10 then
+                safeTargetPos = Vector3.new(targetPos.X, CONFIG.UNDER_MAP_Y + 15, targetPos.Z)
+            end
+            
+            -- Calculate distance to target
+            local vec = safeTargetPos - myPos
+            local totalDist = vec.Magnitude
+            
+            -- Step 1: Fly to river if not in river bounds horizontally
+            if not isInRiverBoundsHorizontal(myPos) then
+                currentMode = "RIVER_APPROACH"
+                if spectating then stopSpectating() end
+                ensureFlight()
+                Camera.CameraType = Enum.CameraType.Scriptable
+                local entryPoint = getRiverDivePoint(myPos, safeTargetPos)
+                Camera.CFrame = CFrame.lookAt(myPos, entryPoint)
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    pulseMovementKey(Enum.KeyCode.W)
+                end
+                movementPulseTimer = movementPulseTimer + deltaTime
+                return
+            end
+            
+            -- Step 2: Need air - resurface (dolphin up)
+            if isUnderwater and airRemaining <= CONFIG.AIR_RESURFACE_THRESHOLD then
+                currentMode = "RESURFACE"
+                if spectating then stopSpectating() end
+                tryResurface(myPos)
+                movementPulseTimer = movementPulseTimer + deltaTime
+                return
+            end
+            
+            -- Step 3: Not underwater - dive back down (river method still active, so keep diving)
+            if not isUnderwater then
+                currentMode = "DIVING"
+                if spectating then stopSpectating() end
+                Camera.CameraType = Enum.CameraType.Scriptable
+                -- Aim toward target (dive down toward them)
+                Camera.CFrame = CFrame.lookAt(myPos, safeTargetPos, Vector3.new(0, 0, -1))
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    pulseMovementKey(Enum.KeyCode.W)
+                end
+                movementPulseTimer = movementPulseTimer + deltaTime
+                return
+            end
+            
+            -- Step 4: Underwater with air - swim toward target and attack
+            -- Alt is underwater, target can be up to 20 studs above surface
+            currentMode = "RIVER_COMBAT"
+            if spectating then stopSpectating() end
+            Camera.CameraType = Enum.CameraType.Scriptable
+            
+            -- If in attack range, try to attack
+            if totalDist <= CONFIG.OPTIMAL_MAX then
+                local canAttack = currentTime - lastQClickTime >= CONFIG.Q_CLICK_COOLDOWN and not isAttacking
+                if canAttack then
+                    performQClickAttack()
+                end
+            end
+            
+            -- Swim toward target
+            Camera.CFrame = CFrame.lookAt(myPos, safeTargetPos)
+            if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                movementPulseTimer = 0
+                pulseMovementKey(Enum.KeyCode.W)
+            end
+            movementPulseTimer = movementPulseTimer + deltaTime
+            return  -- Don't fall through to normal combat
+        end
+
+        -- Forced resurface when completely out of air (safety net - not in river method)
+        if isUnderwater and airRemaining <= 0 then
+            if not resurfaceStarted then
+                resurfaceStarted = true
+                resetDamageTracking()
+            end
+            if checkEmergencyDefense(myPos, targetPos) then
+                performEmergencyDefense(myPos, targetPos, "RESURFACE")
+            else
+                if spectating then stopSpectating() end
+            end
+            if not isAttacking then tryResurface(myPos) end
+            movementPulseTimer = movementPulseTimer + deltaTime
+            return
+        end
+
+        if currentTime - lastTargetCheck > CONFIG.TARGET_CHECK_RATE then
+            lastTargetCheck = currentTime
+            local alive = isTargetAlive()
+            local invisible = isTargetInvisible()
+
+            if not alive and not targetWasDead then
+                targetWasDead = true
+                stopSpectating()
+                updateTargetIndicator("dead")
+                hasSentTaunt = false
+                tauntPauseActive = false
+                lastBodyPosition = targetPos
+                local deathDistance = targetPos and (targetPos - myPos).Magnitude or 999
+                
+                -- If we killed a secondary, check if we should go back to main
+                if onSecondaryTarget then
+                    -- Check if main is back
+                    local mainPlayer = originalPrimaryUserId and getPlayerByUserId(originalPrimaryUserId)
+                    local mainAlive = mainPlayer and mainPlayer.Parent and getRoot(mainPlayer) and isPlayerAlive(mainPlayer)
+                    
+                    if mainAlive then
+                        -- Main is back! Check grace period
+                        local now = tick()
+                        if mainTargetRespawnTime > 0 and (now - mainTargetRespawnTime) >= CONFIG.MAIN_RESPAWN_GRACE then
+                            -- Grace period over, switch to main immediately
+                            targetPlayer = mainPlayer
+                            targetWasDead = false
+                            targetWasInvisible = false
+                            stoppedFlightForDeath = false
+                            onSecondaryTarget = false
+                            rememberedTargetUserId = mainPlayer.UserId
+                            mainTargetRespawnTime = 0
+                            createTargetIndicator()
+                            ensureFlight()
+                            print("Secondary killed, main target back! Switching to: " .. mainPlayer.Name)
+                            return
+                        end
+                    end
+                    -- Main not back or grace period - schedule taunt and look for more secondaries
+                    scheduleTaunt(deathDistance)
+                else
+                    -- Main target died - schedule taunt
+                    scheduleTaunt(deathDistance)
+                end
+            elseif alive and targetWasDead then
+                targetWasDead = false
+                stoppedFlightForDeath = false
+                hasSentTaunt = false
+                tauntScheduled = false
+                tauntPauseActive = false
+                lastBodyPosition = nil
+                createTargetIndicator()
+            end
+
+            if invisible and not targetWasInvisible then
+                targetWasInvisible = true
+                updateTargetIndicator("invisible")
+            elseif not invisible and targetWasInvisible then
+                targetWasInvisible = false
+                updateTargetIndicator("normal")
+            end
+        end
+
+        -- UNIFIED UNAVAILABLE CHECK
+        -- Treats invisible, under map, flyro shield, boulder trap all the same:
+        -- Fly to 100 studs → land → walk around unpredictably → stay ~100 studs
+        local unavailableReasonNow = checkTargetUnavailable(myPos, targetPos)
+        
+        if unavailableReasonNow then
+            -- Target is unavailable
+            if not targetUnavailable then
+                targetUnavailable = true
+                unavailableReason = unavailableReasonNow
+                unavailableRetreatDone = false
+                updateTargetIndicator("blocked")
+                print("Target unavailable: " .. unavailableReasonNow)
+            end
+            
+            local distToTarget = (targetPos - myPos).Magnitude
+            local minDist = CONFIG.UNAVAILABLE_RETREAT_DIST - CONFIG.UNAVAILABLE_STAY_RANGE  -- 70
+            local maxDist = CONFIG.UNAVAILABLE_RETREAT_DIST + CONFIG.UNAVAILABLE_STAY_RANGE  -- 130
+            
+            if spectating then stopSpectating() end
+            
+            -- Phase 1: Fly away to 100 studs if too close
+            if distToTarget < minDist then
+                currentMode = "UNAVAILABLE_RETREAT"
+                ensureFlight()
+                Camera.CameraType = Enum.CameraType.Scriptable
+                local awayDir = (myPos - targetPos)
+                if awayDir.Magnitude > 0.1 then awayDir = awayDir.Unit else awayDir = Vector3.new(1, 0, 0) end
+                Camera.CFrame = CFrame.lookAt(myPos, myPos + awayDir * 50)
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    pulseMovementKey(Enum.KeyCode.W)
+                end
+                movementPulseTimer = movementPulseTimer + deltaTime
+                return
+            end
+            
+            -- Phase 2: In range (70-130 studs) - land and walk unpredictably
+            if distToTarget >= minDist and distToTarget <= maxDist then
+                currentMode = "UNAVAILABLE_IDLE"
+                unavailableRetreatDone = true
+                
+                -- Land if flying
+                if hasFlight() then
+                    toggleFlight()
+                end
+                
+                -- Walk around unpredictably
+                doUnpredictableWalk(myPos, targetPos)
+                movementPulseTimer = movementPulseTimer + deltaTime
+                return
+            end
+            
+            -- Phase 3: Too far - walk toward target to stay in range
+            if distToTarget > maxDist then
+                currentMode = "UNAVAILABLE_APPROACH"
+                -- Walk toward, don't fly
+                if hasFlight() then
+                    toggleFlight()
+                end
+                Camera.CameraType = Enum.CameraType.Scriptable
+                Camera.CFrame = CFrame.lookAt(myPos, targetPos)
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    pulseMovementKey(Enum.KeyCode.W)
+                    tryRandomJump()
+                end
+                movementPulseTimer = movementPulseTimer + deltaTime
+                return
+            end
+        else
+            -- Target is available again
+            if targetUnavailable then
+                targetUnavailable = false
+                unavailableReason = nil
+                unavailableRetreatDone = false
+                targetWasInvisible = false  -- Clear legacy flag
+                updateTargetIndicator("normal")
+                ensureFlight()
+                print("Target available again!")
+            end
+        end
+
+        if targetWasDead then
+            currentMode = "WAITING"
+            if not stoppedFlightForDeath and hasFlight() then
+                toggleFlight()
+                stoppedFlightForDeath = true
+            end
+
+            if tauntPauseActive then
+                movementPulseTimer = movementPulseTimer + deltaTime
+                return
+            end
+
+            local distFromBody = lastBodyPosition and (myPos - lastBodyPosition).Magnitude or 0
+            local walkedAwayEnough = distFromBody > 30
+            
+            -- When on secondary and target died, first priority is check if main is back
+            if onSecondaryTarget then
+                local mainPlayer = originalPrimaryUserId and getPlayerByUserId(originalPrimaryUserId)
+                local mainAlive = mainPlayer and mainPlayer.Parent and getRoot(mainPlayer) and isPlayerAlive(mainPlayer)
+                
+                if mainAlive then
+                    local now = tick()
+                    -- Track when we first noticed main is back
+                    if mainTargetRespawnTime == 0 then
+                        mainTargetRespawnTime = now
+                    end
+                    -- Check grace period
+                    if (now - mainTargetRespawnTime) >= CONFIG.MAIN_RESPAWN_GRACE then
+                        -- Switch back to main
+                        targetPlayer = mainPlayer
+                        targetWasDead = false
+                        targetWasInvisible = false
+                        stoppedFlightForDeath = false
+                        onSecondaryTarget = false
+                        rememberedTargetUserId = mainPlayer.UserId
+                        mainTargetRespawnTime = 0
+                        createTargetIndicator()
+                        ensureFlight()
+                        print("Main target back! Switching from secondary")
+                        return
+                    end
+                end
+                
+                -- Main not back or in grace - try another secondary if walked away
+                if CONFIG.ENABLE_TARGET_SWITCHING and walkedAwayEnough and (hasSentTaunt or not tauntScheduled) and (not isUnderwater) and (not isAttacking) then
+                    if switchToNextTarget(myPos) then
+                        ensureFlight()
+                        return
+                    end
+                end
+            else
+                -- Main target died - check for secondaries (only after finishing task)
+                if CONFIG.ENABLE_TARGET_SWITCHING and walkedAwayEnough and (hasSentTaunt or not tauntScheduled) and (not isUnderwater) and (not isAttacking) then
+                    if #secondaryTargetUserIds > 0 and switchToNextTarget(myPos) then
+                        ensureFlight()
+                        return
+                    end
+                end
+            end
+
+            if isUnderwater and airRemaining <= 0 then
+                tryResurface(myPos)
+            elseif not walkedAwayEnough and lastBodyPosition then
+                local awayFromBody = myPos - lastBodyPosition
+                if awayFromBody.Magnitude > 0.1 then
+                    awayFromBody = Vector3.new(awayFromBody.X, 0, awayFromBody.Z).Unit
+                else
+                    awayFromBody = Vector3.new(1, 0, 0)
+                end
+
+                Camera.CameraType = Enum.CameraType.Scriptable
+                Camera.CFrame = CFrame.lookAt(myPos, myPos + awayFromBody * 20)
+
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    pulseMovementKey(Enum.KeyCode.W)
+                end
+            else
+                doRandomWalk()
+            end
+            movementPulseTimer = movementPulseTimer + deltaTime
+            return
+        end
+
+        -- (Old invisible and terrain blocked handlers removed - now handled by unified unavailable check above)
+
+        local newMode, hDist, vDiff, hVector, totalDist = calculateMovementAndMode(myPos, targetPos)
+
+        local currentStuckTime = updateStuckDetection(myPos, deltaTime)
+        if not isUnsticking and currentStuckTime >= CONFIG.STUCK_TIME_THRESHOLD then
+            startUnsticking(myPos, targetPos)
+        end
+        if isUnsticking and tick() >= unstickEndTime then
+            isUnsticking = false
+            unstickDirection = nil
+            stuckTimer = 0
+        end
+
+        local shouldAttack = isInAttackRange(totalDist) and canAttackNow()
+        if sustainedAttackMode and canAttackNow() and totalDist <= CONFIG.COMBAT_ZONE then
+            shouldAttack = true
+        end
+        if shouldAttack then
+            performQClickAttack()
+        end
+
+        if isUnsticking and unstickDirection then
+            if spectating then stopSpectating() end
+            ensureFlight()
+            Camera.CameraType = Enum.CameraType.Scriptable
+            Camera.CFrame = CFrame.lookAt(myPos, myPos + unstickDirection * 50)
+            if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                movementPulseTimer = 0
+                pulseMovementKey(Enum.KeyCode.W)
+            end
+            movementPulseTimer = movementPulseTimer + deltaTime
+            return
+        end
+
+        if newMode ~= currentMode then
+            stopAllMovementKeys()
+            movementPulseTimer = CONFIG.MOVEMENT_PULSE_RATE
+            currentMode = newMode
+        end
+
+        if totalDist <= CONFIG.COMBAT_ZONE and not spectating then
+            startSpectating()
+        elseif totalDist > CONFIG.COMBAT_ZONE and spectating then
+            stopSpectating()
+        end
+
+        movementPulseTimer = movementPulseTimer + deltaTime
+
+        if currentMode == "TRAVEL" or currentMode == "APPROACH" then
+            ensureFlight()
+            Camera.CameraType = Enum.CameraType.Scriptable
+            Camera.CFrame = CFrame.lookAt(myPos, targetPos)
+            if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                movementPulseTimer = 0
+                pulseCurveAcceleration(myPos, targetPos)
+            end
+        elseif currentMode == "ATTACK" then
+            ensureFlight()
+            if not targetWasInvisible and not isAttacking then
+                performQClickAttack()
+            end
+        elseif currentMode == "TOO_CLOSE" then
+            ensureFlight()
+            if spectating then
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    moveWhileSpectating(false)
+                end
+            else
+                Camera.CameraType = Enum.CameraType.Scriptable
+                Camera.CFrame = CFrame.lookAt(myPos, myPos + (myPos - targetPos).Unit * 50)
+                if movementPulseTimer >= CONFIG.MOVEMENT_PULSE_RATE then
+                    movementPulseTimer = 0
+                    pulseMovementKey(Enum.KeyCode.W)
+                end
+            end
+        end
+
+        local stamina = getStamina() or 0
+        local attackCooldown = math.max(0, CONFIG.Q_CLICK_COOLDOWN - (tick() - lastQClickTime))
+        local queueNames = getSecondaryTargetNames()
+        local queueStr = #queueNames > 0 and table.concat(queueNames, "→") or "none"
+        local targetType = onSecondaryTarget and "SECONDARY" or "PRIMARY"
+        local riverStatus = riverMethodActive and " [RIVER]" or ""
+        local unavailStatus = targetUnavailable and (" [" .. (unavailableReason or "UNAVAIL") .. "]") or ""
+        local statusStr = targetWasDead and "DEAD" or (targetUnavailable and unavailableReason or "ALIVE")
+        updateDebug(string.format(
+            [[Target: %s (%s)%s%s
+Mode: %s | Spectating: %s
+Distance: H=%.1f V=%.1f Total=%.1f
+Optimal: %d-%d studs
+Status: %s | Queue: %s
+Stamina: %d | Air: %.1fs
+Attack CD: %.1fs | Sustained: %s
+Flight: %s]],
+            targetPlayer and targetPlayer.Name or "nil",
+            targetType,
+            riverStatus,
+            unavailStatus,
+            currentMode,
+            tostring(spectating),
+            (Vector3.new(hVector.X,0,hVector.Z)).Magnitude, vDiff, totalDist,
+            CONFIG.OPTIMAL_MIN, CONFIG.OPTIMAL_MAX,
+            statusStr,
+            queueStr,
+            stamina,
+            airRemaining,
+            attackCooldown,
+            tostring(sustainedAttackMode),
+            tostring(hasFlight())
+        ))
+    end)
+end
+
+local function stopMovementLoop()
+    if movementLoop then movementLoop:Disconnect(); movementLoop = nil end
+    releaseKey(Enum.KeyCode.Q)
+    isAttacking = false
+end
+
 -- =====================================================
 -- MAIN CONTROL
 -- =====================================================
@@ -3516,7 +3464,7 @@ local function startFollowing()
     ensureFlight()
     createDebugGui()
     createTargetIndicator()
-    
+
     movementPulseTimer = CONFIG.MOVEMENT_PULSE_RATE
     lastTargetCheck = 0
     targetWasDead = false
@@ -3524,7 +3472,7 @@ local function startFollowing()
     currentMode = "IDLE"
     isAttacking = false
     lastFrameTime = 0
-    
+
     isUnderwater = false
     airRemaining = CONFIG.UNDERWATER_MAX_TIME
     lastUnderwaterCheck = 0
@@ -3544,39 +3492,50 @@ local function startFollowing()
     preEmergencyTask = nil
     lastKnownHealth = getAltHealth()
     resurfaceStarted = false
-    
-    -- Reset sustained attack mode
+
     sustainedAttackMode = false
     sustainedDamageAccumulated = 0
     lastDamageTime = 0
-    
-    -- Reset retreat state
+
     retreatActive = false
     retreatPosition = nil
     retreatReason = nil
-    
-    -- Reset telek shield tracking
+
     telekBlockStartTime = 0
     lastTelekRollTime = 0
     
-    -- Remember target for rejoin tracking
+    -- River method state
+    riverMethodActive = false
+    targetTouchedWater = false
+    targetWaterStartTime = 0
+    
+    -- Unavailable state
+    targetUnavailable = false
+    unavailableReason = nil
+    unavailableRetreatDone = false
+    lastUnpredictableWalkTime = 0
+    unpredictableWalkDirection = nil
+    
+    -- Secondary targeting state
+    onSecondaryTarget = false
+    mainTargetRespawnTime = 0
+
     if targetPlayer then
         rememberedTargetUserId = targetPlayer.UserId
     end
-    
-    -- Reset vertical tracking
+
     lastVerticalDirection = 0
     verticalDirectionStartTime = 0
-    
+
     cached2xStamina = nil
     cachedStaminaMin = nil
     cachedStaminaRecharge = nil
-    
+
     resetStuckDetection()
     startCameraUpdate()
     startMovementLoop()
-    
-    print("Started following", targetPlayer.Name)
+
+    print("Started following", targetPlayer and targetPlayer.Name)
 end
 
 local function stopFollowing()
@@ -3603,41 +3562,52 @@ local function stopFollowing()
     preEmergencyTask = nil
     lastKnownHealth = 100
     resurfaceStarted = false
-    
-    -- Reset sustained attack mode
+
     sustainedAttackMode = false
     sustainedDamageAccumulated = 0
     lastDamageTime = 0
-    
-    -- Reset target memory
+
     rememberedTargetUserId = nil
     originalPrimaryUserId = nil
     manuallySwitchedTarget = false
+    mainTargetRespawnTime = 0
+    onSecondaryTarget = false
     retreatActive = false
     retreatPosition = nil
     retreatReason = nil
-    
-    -- Reset telek shield tracking
+
     telekBlockStartTime = 0
     lastTelekRollTime = 0
     
-    -- Note: Secondary targets persist across stop/start (only cleared on N key switch)
+    -- River method state
+    riverMethodActive = false
+    targetTouchedWater = false
+    targetWaterStartTime = 0
     
+    -- Unavailable state
+    targetUnavailable = false
+    unavailableReason = nil
+    unavailableRetreatDone = false
+    lastUnpredictableWalkTime = 0
+    unpredictableWalkDirection = nil
+
+    clearSecondaryTargets()
+
     resetStuckDetection()
     stopMovementLoop()
     stopCameraUpdate()
     stopAllMovementKeys()
     releaseKey(Enum.KeyCode.Q)
     releaseKey(Enum.KeyCode.Space)
-    
+
     Camera.CameraType = Enum.CameraType.Custom
     local hum = getHumanoid(player)
     if hum then Camera.CameraSubject = hum end
     UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-    
+
     removeTargetIndicator()
     if debugGui then debugGui:Destroy(); debugGui = nil end
-    
+
     print("Stopped following")
 end
 
@@ -3647,7 +3617,7 @@ end
 
 UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end
-    
+
     if input.KeyCode == Enum.KeyCode.N then
         if not following then
             local target = getClosestPlayerToCursor()
@@ -3655,64 +3625,57 @@ UserInputService.InputBegan:Connect(function(input, processed)
                 targetPlayer = target
                 following = true
                 lastKnownPosition = nil
-                manuallySwitchedTarget = false  -- Fresh target, not a switch
-                originalPrimaryUserId = target.UserId  -- Remember original primary
-                -- Remove from secondary queue if it was there
-                removeSecondaryTargetById(target.UserId)
+                manuallySwitchedTarget = false
+                originalPrimaryUserId = target.UserId
                 startFollowing()
             else
                 warn("No player found near cursor")
             end
         else
-            -- Check if pressing N to switch to different target while following
             local newTarget = getClosestPlayerToCursor()
             if newTarget and newTarget ~= targetPlayer then
-                -- Switching to new target manually - this becomes new primary
                 targetPlayer = newTarget
-                manuallySwitchedTarget = true  -- Mark as manual switch
+                manuallySwitchedTarget = true
                 rememberedTargetUserId = newTarget.UserId
-                originalPrimaryUserId = newTarget.UserId  -- New primary
+                originalPrimaryUserId = newTarget.UserId
                 targetWasDead = false
                 targetWasInvisible = false
-                -- Remove new primary from secondary queue if it was there
-                removeSecondaryTargetById(newTarget.UserId)
+                clearSecondaryTargets()
                 createTargetIndicator()
                 print("Switched target to", newTarget.Name)
             else
-                -- No new target or same target - stop following
                 stopFollowing()
             end
         end
-    
+
     elseif input.KeyCode == Enum.KeyCode.M then
-        -- M key: Add/remove secondary targets (works before or during following)
-        local target = getClosestPlayerToCursor()
-        if target then
-            if target == targetPlayer then
-                print("Cannot add primary target as secondary")
-            else
-                toggleSecondaryTarget(target)
-                -- Print current queue
-                local names = getSecondaryTargetNames()
-                if #names > 0 then
-                    print("Target queue: " .. table.concat(names, " → "))
+        if following then
+            local target = getClosestPlayerToCursor()
+            if target then
+                if target == targetPlayer then
+                    print("Cannot add primary target as secondary")
                 else
-                    print("No secondary targets")
+                    toggleSecondaryTarget(target)
+                    local names = getSecondaryTargetNames()
+                    if #names > 0 then
+                        print("Target queue: " .. table.concat(names, " → "))
+                    else
+                        print("No secondary targets")
+                    end
                 end
+            else
+                warn("No player found near cursor")
             end
         else
-            warn("No player found near cursor")
+            warn("Not following anyone - press N first")
         end
     end
 end)
 
--- PlayerAdded listener for target rejoin
 Players.PlayerAdded:Connect(function(newPlayer)
-    -- Check if this is our remembered primary target rejoining
     if following and rememberedTargetUserId and not manuallySwitchedTarget then
         if newPlayer.UserId == rememberedTargetUserId then
-            -- Our target rejoined! Re-target them
-            task.wait(1)  -- Wait for character to load
+            task.wait(1)
             if following and targetPlayer ~= newPlayer then
                 targetPlayer = newPlayer
                 targetWasDead = false
@@ -3723,8 +3686,7 @@ Players.PlayerAdded:Connect(function(newPlayer)
             end
         end
     end
-    
-    -- Check if this is a secondary target rejoining
+
     if following then
         local isSecondary, _ = isSecondaryTargetById(newPlayer.UserId)
         if isSecondary then
@@ -3732,10 +3694,6 @@ Players.PlayerAdded:Connect(function(newPlayer)
         end
     end
 end)
-
--- =====================================================
--- CLEANUP
--- =====================================================
 
 player.CharacterAdded:Connect(function()
     altIsDead = false
@@ -3760,20 +3718,17 @@ end)
 
 Players.PlayerRemoving:Connect(function(leavingPlayer)
     if leavingPlayer == targetPlayer then
-        -- Target left - remember them for rejoin (unless manually switched)
         if not manuallySwitchedTarget then
             rememberedTargetUserId = leavingPlayer.UserId
         end
-        
-        -- Clear current target but keep following state
+
         targetPlayer = nil
-        targetWasDead = true  -- Treat as "dead" for behavior
+        targetWasDead = true
         stoppedFlightForDeath = false
-        
-        -- Stop spectating and attacking
+
         if spectating then stopSpectating() end
         isAttacking = false
-        
+
         print("Target left game - waiting for rejoin:", leavingPlayer.Name)
     end
 end)
@@ -3783,20 +3738,27 @@ end)
 -- =====================================================
 
 print("=" .. string.rep("=", 50))
-print("ALT FOLLOW SCRIPT V5.4.3 - PRE-TARGETING")
+print("ALT FOLLOW SCRIPT V5.4.45 - SMART SECONDARY + RIVER")
 print("=" .. string.rep("=", 50))
 print("Controls:")
 print("  N - Toggle/Switch primary target")
-print("  M - Add/Remove secondary (works BEFORE N!)")
+print("  M - Add/Remove secondary target (up to 2)")
 print("")
-print("MULTI-TARGET:")
-print("• M before N: Pre-set secondary targets")
-print("• Queue persists across stop/start")
-print("• Auto-switches when primary dies")
+print("SECONDARY TARGETING:")
+print("• Range: " .. CONFIG.SECONDARY_TARGET_RANGE .. " studs | Attacks lowest HP")
+print("• Main dies → Taunt → Walk → Attack secondary")
+print("• Main respawns → Switch back (" .. CONFIG.MAIN_RESPAWN_GRACE .. "s grace)")
 print("")
-print("PUSH/PULL: Based on HORIZONTAL distance")
-print("• H-dist >= " .. (CONFIG.OPTIMAL_MAX - 5) .. " → Pull back")
-print("• H-dist < " .. (CONFIG.OPTIMAL_MAX - 5) .. " → Push away")
+print("RIVER METHOD (Dolphin Dive):")
+print("• Target in water " .. CONFIG.RIVER_COMMIT_TIME .. "s → Commit to river")
+print("• Alt must be UNDERWATER to attack")
+print("• Target can be up to " .. CONFIG.RIVER_EXIT_HEIGHT .. " studs above surface")
+print("• Pop up for air at " .. CONFIG.AIR_RESURFACE_THRESHOLD .. "s left → Dive back")
+print("")
+print("UNAVAILABLE (same for all):")
+print("• Invisible, under map, flyro shield, boulder trap")
+print("• Fly to " .. CONFIG.UNAVAILABLE_RETREAT_DIST .. " studs → Land → Walk unpredictably")
+print("• Stay " .. (CONFIG.UNAVAILABLE_RETREAT_DIST - CONFIG.UNAVAILABLE_STAY_RANGE) .. "-" .. (CONFIG.UNAVAILABLE_RETREAT_DIST + CONFIG.UNAVAILABLE_STAY_RANGE) .. " studs until available")
 print("")
 print("Comfort: " .. CONFIG.OPTIMAL_MIN .. "-" .. CONFIG.OPTIMAL_MAX .. " studs")
 print("=" .. string.rep("=", 50))
