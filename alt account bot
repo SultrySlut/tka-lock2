@@ -1,4 +1,4 @@
--- Y-Bounds Auto Reset (Local) + "No character/root" watchdog
+
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
