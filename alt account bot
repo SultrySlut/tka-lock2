@@ -2,15 +2,6 @@
 
 loadstring(game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/the%20stuff"))()
 
--- Complete Alt Follow Script v5.4.3 - Pre-Targeting Fix
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-local Camera = workspace.CurrentCamera
-
-local player = Players.LocalPlayer
-
 -- Complete Alt Follow Script v5.4.45 - Smart Secondary Targeting
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
