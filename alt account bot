@@ -26,17 +26,17 @@ local player = Players.LocalPlayer
 
 local CONFIG = {
     -- Distance thresholds
-    OPTIMAL_MIN = 30,
-    OPTIMAL_MAX = 73,
+    OPTIMAL_MIN = 54,
+    OPTIMAL_MAX = 73.3,
     OPTIMAL_MID = 60,
-    COMBAT_ZONE = 80,
+    COMBAT_ZONE = 76,
     SECONDARY_TARGET_RANGE = 200,
     
     -- Timing
-    Q_CLICK_COOLDOWN = 1.35,
+    Q_CLICK_COOLDOWN = 1.5,
     TARGET_CHECK_RATE = 0.1,
     FLIGHT_TOGGLE_COOLDOWN = 1,
-    WATER_STATE_UPDATE_RATE = 0.25,
+    WATER_STATE_UPDATE_RATE = 0.1,  -- Check water state every 0.1s for reliable air tracking
     LOS_CACHE_WINDOW = 0.25,
     
     -- Pulse Profiles (Section 17)
@@ -76,6 +76,8 @@ local CONFIG = {
     -- Air Management (Section 7)
     UNDERWATER_MAX_TIME = 10,
     AIR_RESURFACE_THRESHOLD = 2,
+    DOLPHIN_MAX_HEIGHT = 25,  -- Max studs above water surface for dolphin arc peak
+    RESURFACE_TIMEOUT = 5,  -- If resurfacing takes longer than this, try harder
     
     -- Flight Steering (Section 18)
     ARC_DISTANCE_THRESHOLD = 140,
@@ -107,7 +109,7 @@ local CONFIG = {
     MAP_X_MAX = 603,
     MAP_Z_MIN = -708,
     MAP_Z_MAX = 556,
-    MAP_BOUNDARY_BUFFER = 0.5,
+    MAP_BOUNDARY_BUFFER = 50,
     
     -- No-Chase Zones (Section 20.0)
     HOUSE_CENTER = Vector3.new(-59.50, 71.67, -431.95),
@@ -135,7 +137,7 @@ local CONFIG = {
     TAUNT_RANGE = 100,
     
     -- Shield (Section 10)
-    TELEK_GRAB_CHANCE = 0.50,
+    TELEK_GRAB_CHANCE = 0.20,
     
     -- Secondary target stickiness (Section 13.5)
     SECONDARY_DWELL_TIME = 1.5,
@@ -190,6 +192,9 @@ local S = {
     isUnderwater = false,
     resurfaceMode = false,
     emergencyResurface = false,
+    dolphinStartY = nil,  -- Y position when dolphin dive started
+    dolphinPhase = "RISING",  -- RISING or FALLING
+    resurfaceStartTime = 0,  -- When resurface mode started (for timeout)
     
     -- Availability (Section 11)
     targetAvailable = true,
@@ -563,7 +568,7 @@ end
 
 local function isTargetInRiverMethodRange(tp)
     if not tp then return false end
-    return isInRiverBounds(tp) and tp.Y <= CONFIG.RIVER_SURFACE_Y + 20 and tp.Y > CONFIG.UNDER_MAP_Y
+    return isInRiverBounds(tp) and tp.Y <= CONFIG.RIVER_SURFACE_Y + 10 and tp.Y > CONFIG.UNDER_MAP_Y
 end
 
 -- =====================================================
@@ -615,25 +620,59 @@ end
 -- =====================================================
 
 local function updateAirManagement(dt)
-    if S.isUnderwater then
+    -- Air drains when head is in water (more reliable than waterState)
+    if S.headInWater then
         S.airRemaining = S.airRemaining - dt
     else
-        S.airRemaining = CONFIG.UNDERWATER_MAX_TIME -- instant recharge
+        S.airRemaining = CONFIG.UNDERWATER_MAX_TIME -- instant recharge when head is out
     end
+    
+    -- Clamp air to prevent negative values
+    if S.airRemaining < 0 then
+        S.airRemaining = 0
+    end
+    
+    local now = tick()
     
     -- Check resurface triggers
-    if S.airRemaining <= 0 then
+    -- EMERGENCY: Air completely depleted - MUST resurface
+    if S.airRemaining <= 0 and S.headInWater then
+        if not S.resurfaceMode then
+            S.resurfaceStartTime = now
+        end
         S.emergencyResurface = true
         S.resurfaceMode = true
-    elseif S.riverMethodActive and S.airRemaining <= CONFIG.AIR_RESURFACE_THRESHOLD then
-        S.resurfaceMode = true
-        S.emergencyResurface = false
+    -- NORMAL: Air getting low while head in water - should resurface soon
+    elseif S.headInWater and S.airRemaining <= CONFIG.AIR_RESURFACE_THRESHOLD then
+        -- Always trigger resurface when air is low and head is underwater
+        -- Don't require riverMethodActive - we need air regardless of combat mode
+        if not S.resurfaceMode then
+            S.resurfaceMode = true
+            S.emergencyResurface = false
+            S.resurfaceStartTime = now
+        end
     end
     
-    -- Clear resurface mode when head exits water
+    -- Check for resurface timeout - if stuck trying to resurface for too long
+    if S.resurfaceMode and S.headInWater then
+        local resurfaceTime = now - S.resurfaceStartTime
+        if resurfaceTime > CONFIG.RESURFACE_TIMEOUT then
+            -- Stuck underwater - force emergency mode for more aggressive resurface
+            S.emergencyResurface = true
+            -- Reset dolphin state to try fresh approach
+            S.dolphinStartY = nil
+            S.dolphinPhase = "RISING"
+        end
+    end
+    
+    -- Clear resurface mode when head exits water (air refills above)
     if S.resurfaceMode and not S.headInWater then
         S.resurfaceMode = false
         S.emergencyResurface = false
+        S.resurfaceStartTime = 0
+        -- Reset dolphin dive state for next time
+        S.dolphinStartY = nil
+        S.dolphinPhase = "RISING"
     end
 end
 
@@ -859,9 +898,14 @@ local function getShieldParts()
     return world and world:FindFirstChild("ShieldParts")
 end
 
--- 10.2 Shield Detection
+-- 10.2 Flyro Shield Detection (Dual-Signal)
+-- Signal A: Ray from alt to target hits shield
+-- Signal B: Ray above target hits shield (Forceshield)
 local function isInFlyroShield(targetPos)
     if not targetPos or not isValidVector(targetPos) then return false end
+    
+    local myPos = getMyPosition()
+    if not myPos then return false end
     
     local shieldParts = getShieldParts()
     if not shieldParts then return false end
@@ -870,14 +914,29 @@ local function isInFlyroShield(targetPos)
     raycastParams.FilterType = Enum.RaycastFilterType.Whitelist
     raycastParams.FilterDescendantsInstances = {shieldParts}
     
-    local result = workspace:Raycast(targetPos, Vector3.new(0, 5, 0), raycastParams)
-    if result and result.Instance then
-        local parent = result.Instance.Parent
+    -- Signal A: Does ray from alt to target hit a Flyro shield?
+    local dirToTarget = targetPos - myPos
+    local resultA = workspace:Raycast(myPos, dirToTarget, raycastParams)
+    local signalA = false
+    if resultA and resultA.Instance then
+        local parent = resultA.Instance.Parent
         if parent and parent:FindFirstChild("Forceshield") then
-            return true
+            signalA = true
         end
     end
-    return false
+    
+    -- Signal B: Is there a Forceshield above the target?
+    local resultB = workspace:Raycast(targetPos, Vector3.new(0, 50, 0), raycastParams)
+    local signalB = false
+    if resultB and resultB.Instance then
+        local parent = resultB.Instance.Parent
+        if parent and parent:FindFirstChild("Forceshield") then
+            signalB = true
+        end
+    end
+    
+    -- Both signals must detect Flyro shield
+    return signalA and signalB
 end
 
 local function checkShieldBlocking(fromPos, toPos)
@@ -1053,31 +1112,27 @@ local function isTargetAvailable(plr)
     }
     
     -- Raycast straight up from target head with classification
-    local upHit = classifiedRaycast(targetPos, Vector3.new(0, 120, 0), filterList)
+    local upHit = classifiedRaycast(targetPos, Vector3.new(0, 200, 0), filterList)
     
-    -- Check if Flyro dome (handled separately)
+    -- Check if Flyro dome (dual-signal check)
     if isInFlyroShield(targetPos) then
         return false, "FLYRO_SHIELD"
     end
     
     -- Analyze hit classification
+    -- Most classes pass through - dual-signal functions handle real blocking
     if upHit.hitClass == "NONE" then
         return true, "CLEAR"
     elseif upHit.hitClass == "TERRAIN" then
-        return false, "TERRAIN_ABOVE"
+        return true, "CLEAR"  -- Let isTargetUnderMap() handle with two-signal rule
     elseif upHit.hitClass == "SHIELD" then
-        return false, "SHIELD_ABOVE"  -- Handled by shield system
+        return true, "CLEAR"  -- Let isInFlyroShield() handle with dual-signal
     elseif upHit.hitClass == "TREE" then
         return true, "CLEAR"  -- Trees are ignored
     elseif upHit.hitClass == "STRUCTURE" then
         return true, "CLEAR"  -- Bridges/roofs are ignored
     elseif upHit.hitClass == "BOULDER" then
-        -- Check distance - close boulder = inside boulder
-        if upHit.hitDistance <= CONFIG.INSIDE_BOULDER_THRESHOLD then
-            return false, "INSIDE_BOULDER"
-        else
-            return true, "CLEAR"  -- Far boulder doesn't block
-        end
+        return true, "CLEAR"  -- Let isTargetInsideBoulder() handle with dual-signal
     end
     
     return true, "CLEAR"
@@ -1147,24 +1202,41 @@ local function isTargetUnderMap()
     return true
 end
 
--- 11.5.2 Inside-Boulder Detection (using hit classification)
+-- 11.5.2 Inside-Boulder Detection (Dual-Signal)
+-- Signal A: Ray from alt to target hits BOULDER
+-- Signal B: Ray above target hits BOULDER within threshold
 local function isTargetInsideBoulder()
-    local target = S.targetPlayer  -- Use S.targetPlayer directly (getCurrentTarget not defined yet)
+    local target = S.targetPlayer
     local targetHead = target and getHead(target)
     if not targetHead then return false end
+    
+    local myPos = getMyPosition()
+    if not myPos then return false end
+    
+    local targetPos = targetHead.Position
     
     -- Build filter (characters only - detect everything else)
     local filterList = { workspace:FindFirstChild("Characters") }
     
-    -- Cast up to check what's above
-    local hitInfo = classifiedRaycast(targetHead.Position, Vector3.new(0, CONFIG.INSIDE_BOULDER_THRESHOLD, 0), filterList)
-    
-    -- Only BOULDER counts as inside-boulder (not terrain, tree, structure, or shield)
-    if hitInfo.hitClass == "BOULDER" and hitInfo.hitDistance <= CONFIG.INSIDE_BOULDER_THRESHOLD then
-        return true
+    -- Signal A: Does ray from alt to target hit a BOULDER?
+    local signalA = classifiedRaycast(myPos, targetPos - myPos, filterList)
+    if signalA.hitClass ~= "BOULDER" then
+        return false
     end
     
-    return false
+    -- Signal B: Is there a BOULDER above the target within threshold?
+    local signalB = classifiedRaycast(targetPos, Vector3.new(0, CONFIG.INSIDE_BOULDER_THRESHOLD, 0), filterList)
+    if signalB.hitClass ~= "BOULDER" then
+        return false
+    end
+    
+    -- Near-ceiling guard: Signal B must be close
+    if signalB.hitDistance > CONFIG.INSIDE_BOULDER_THRESHOLD then
+        return false
+    end
+    
+    -- Both signals hit BOULDER = inside boulder confirmed
+    return true
 end
 
 -- =====================================================
@@ -1288,7 +1360,10 @@ local function updateStructureTrapped()
         return true
     end
     
-    -- Check persistent LOS failure
+    -- Check persistent LOS failure (STRUCTURE_TRAPPED - Dual Signal)
+    -- Signal A: LOS blocked for 1.5+ seconds
+    -- Signal B: Something ABOVE target (STRUCTURE class, not terrain/tree)
+    -- This prevents false positives when target is on a different hill
     local myRoot = getRoot(player)
     local targetRoot = getRoot(S.targetPlayer)
     if myRoot and targetRoot then
@@ -1301,9 +1376,20 @@ local function updateStructureTrapped()
                 if S.lastKnownPosition then
                     local posDiff = (targetPos - S.lastKnownPosition).Magnitude
                     if posDiff < 12 then
-                        S.targetAvailable = false
-                        S.unavailableReason = "STRUCTURE_TRAPPED"
-                        return true
+                        -- Signal A passed (LOS blocked, target stationary)
+                        -- Now check Signal B: Is there a STRUCTURE above target?
+                        local filterList = { workspace:FindFirstChild("Characters") }
+                        local aboveHit = classifiedRaycast(targetPos, Vector3.new(0, 50, 0), filterList)
+                        
+                        -- Only trigger STRUCTURE_TRAPPED if there's actually a structure above
+                        -- NOT terrain (that's just hills), NOT trees (ignored)
+                        if aboveHit.hitClass == "STRUCTURE" or aboveHit.hitClass == "BOULDER" then
+                            S.targetAvailable = false
+                            S.unavailableReason = "STRUCTURE_TRAPPED"
+                            return true
+                        end
+                        -- If it's terrain or nothing above, don't mark as trapped
+                        -- (Target is probably just on a different hill)
                     end
                 end
             end
@@ -1662,24 +1748,143 @@ end
 -- SECTION 8: SAFE RESURFACE (Spec Section 8)
 -- =====================================================
 
-local function performSafeResurface()
-    -- CRITICAL: Never set CameraType.Scriptable during resurface
-    -- CRITICAL: Never force camera pitch upward during resurface
-    -- CRITICAL: Never hold Space continuously - use pulses
-    -- Pulse Space (0.08-0.12s) until head exits water or air refills
-    
+-- Dolphin Dive: Flight-based parabolic arc out of water
+-- When we have stamina, fly UP and OUT in an arc, get air while airborne,
+-- gravity brings us back down into water. Looks like upside-down parabola.
+--
+-- Arc pattern:
+--                Peak (max ~25 studs above water)
+--               /    \
+--              /      \  ← gravity pulls back
+--             /        \
+-- ~~~~~~~~~~~↗~~~~~~~~~~↘~~~~~~~~~~~  water surface
+--           /            \
+--      Start              Re-enter
+--
+local function performDolphinDive()
     local myRoot = getRoot(player)
     if not myRoot then return end
     
-    -- Always pulse Space during resurface (this is the main resurface action)
-    -- The pulse system handles the 0.08-0.12s timing
+    local myPos = myRoot.Position
+    local targetPos = getTargetPosition()
+    
+    -- Initialize dolphin start Y on first frame
+    if not S.dolphinStartY then
+        S.dolphinStartY = myPos.Y
+        S.dolphinPhase = "RISING"
+    end
+    
+    local heightAboveStart = myPos.Y - S.dolphinStartY
+    
+    -- Direction toward target (horizontal)
+    local toTarget = Vector3.new(0, 0, 1)  -- Default forward
+    if targetPos then
+        local horizDir = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
+        if horizDir.Magnitude > 1 then
+            toTarget = safeUnit(horizDir)
+        end
+    end
+    
+    local flyDir
+    
+    if S.dolphinPhase == "RISING" then
+        -- RISING: Fly up and forward until we reach max height or head exits water
+        if heightAboveStart >= CONFIG.DOLPHIN_MAX_HEIGHT then
+            -- Reached peak - transition to falling
+            S.dolphinPhase = "FALLING"
+        elseif not S.headInWater and heightAboveStart >= 5 then
+            -- Head is out and we've risen at least 5 studs - good enough, start falling
+            S.dolphinPhase = "FALLING"
+        end
+        
+        if S.dolphinPhase == "RISING" then
+            -- Still rising: strong upward + forward
+            if S.emergencyResurface then
+                -- Emergency: Go nearly straight up!
+                flyDir = safeUnit(toTarget * 0.2 + Vector3.new(0, 0.95, 0))
+            else
+                -- Normal: Steeper angle when deeper, shallower near peak
+                local upRatio = math.max(0.5, 0.9 - (heightAboveStart / CONFIG.DOLPHIN_MAX_HEIGHT) * 0.4)
+                flyDir = safeUnit(toTarget * (1 - upRatio) + Vector3.new(0, upRatio, 0))
+            end
+        end
+    end
+    
+    if S.dolphinPhase == "FALLING" then
+        -- FALLING: Aim toward target (slightly downward), let gravity complete arc
+        -- The natural fall + forward momentum creates the parabola
+        if targetPos then
+            local fullDir = safeUnit(targetPos - myPos)
+            -- Bias slightly downward to encourage re-entry
+            flyDir = safeUnit(fullDir * 0.8 + Vector3.new(0, -0.3, 0))
+        else
+            flyDir = safeUnit(toTarget * 0.7 + Vector3.new(0, -0.5, 0))
+        end
+    end
+    
+    if flyDir then
+        Camera.CFrame = CFrame.lookAt(myPos, myPos + flyDir * 50)
+    end
+    
+    -- Flight is what creates the arc momentum
+    ensureFlight()
+    pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
+    
+    -- In emergency, also pulse Space for extra vertical lift
+    if S.emergencyResurface and S.dolphinPhase == "RISING" then
+        pulseKey(Enum.KeyCode.Space, { HOLD_DURATION = 0.3, REFRESH_INTERVAL = 0.1 })
+    end
+end
+
+-- Reset dolphin state when resurface ends
+local function resetDolphinState()
+    S.dolphinStartY = nil
+    S.dolphinPhase = "RISING"
+end
+
+-- Simple Resurface: No-flight swim to surface (when out of stamina)
+-- Just hold Space to float up
+local function performSimpleResurface()
+    local myRoot = getRoot(player)
+    if not myRoot then return end
+    
+    local myPos = myRoot.Position
+    
+    -- Hold Space to swim upward
     pulseKey(Enum.KeyCode.Space, CONFIG.PULSE_SPACE_RESURFACE)
     
-    -- Also pulse W to maintain some forward momentum
-    pulseKey(Enum.KeyCode.W, { HOLD_DURATION = 0.15, REFRESH_INTERVAL = 0.1 })
+    -- In emergency, aim straight up; otherwise aim toward target
+    if S.emergencyResurface then
+        -- Emergency: Look UP to maximize vertical movement
+        Camera.CFrame = CFrame.lookAt(myPos, myPos + Vector3.new(0, 50, 0))
+    else
+        -- Normal: Maintain some forward momentum toward target
+        local targetPos = getTargetPosition()
+        if targetPos then
+            local toTarget = safeUnit(Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z))
+            -- Aim mostly up with slight forward
+            Camera.CFrame = CFrame.lookAt(myPos, myPos + safeUnit(toTarget * 0.3 + Vector3.new(0, 0.9, 0)) * 50)
+        else
+            Camera.CFrame = CFrame.lookAt(myPos, myPos + Vector3.new(0, 50, 0))
+        end
+    end
     
-    -- Note: Resurface continues until S.headInWater becomes false
-    -- which is checked in updateAirManagement() and clears S.resurfaceMode
+    pulseKey(Enum.KeyCode.W, { HOLD_DURATION = 0.5, REFRESH_INTERVAL = 0.1 })
+end
+
+-- Main resurface dispatcher - chooses dolphin dive or simple based on stamina
+local function performSafeResurface()
+    local stamina = getStamina()
+    local canFly = stamina and stamina > getEffectiveStaminaMin()
+    
+    if canFly and not S.flightDisabledForStamina then
+        -- Have stamina → dolphin dive (flight arc)
+        performDolphinDive()
+    else
+        -- No stamina → simple swim resurface
+        resetDolphinState()  -- Clear any partial dolphin state
+        performSimpleResurface()
+    end
 end
 
 -- =====================================================
@@ -2197,15 +2402,37 @@ local function processMovementFrame(dt)
         S.currentState = "RESURFACE"
         performSafeResurface()
         
+        local stamina = getStamina() or 0
+        local canFly = stamina > getEffectiveStaminaMin()
+        local resurType = canFly and "DOLPHIN DIVE" or "SWIM UP"
+        
+        -- Calculate height above start for dolphin
+        local heightInfo = ""
+        if canFly and S.dolphinStartY then
+            local heightAbove = myPos.Y - S.dolphinStartY
+            heightInfo = string.format("\nPhase: %s\nHeight: %.1f / %.0f studs", 
+                S.dolphinPhase, heightAbove, CONFIG.DOLPHIN_MAX_HEIGHT)
+        end
+        
+        -- Calculate time spent resurfacing
+        local resurTime = S.resurfaceStartTime > 0 and (tick() - S.resurfaceStartTime) or 0
+        
         local debugInfo = string.format([[
 STATE: RESURFACE %s
+Mode: %s%s
 Air: %.1f / %.1f
 Head in water: %s
+Stamina: %.0f
+Resurface time: %.1fs / %.0fs
 Emergency: %s
 ]], 
             S.emergencyResurface and "(EMERGENCY)" or "",
+            resurType,
+            heightInfo,
             S.airRemaining, CONFIG.UNDERWATER_MAX_TIME,
             tostring(S.headInWater),
+            stamina,
+            resurTime, CONFIG.RESURFACE_TIMEOUT,
             tostring(S.emergencyResurface)
         )
         updateDebugGui(debugInfo)
@@ -2227,17 +2454,26 @@ Emergency: %s
     if S.nearBoundary then
         S.currentState = "BOUNDARY_WALK"
         disableFlight()
-        -- Continue toward target if valid, else walk inward
+        
+        local returnDir = getBoundaryReturnDirection(myPos)
+        
         if targetPos then
             local toTarget = safeUnit(targetPos - myPos)
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + toTarget * 50)
-            pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
+            -- Check if target direction goes more out of bounds
+            local dotWithReturn = toTarget:Dot(returnDir)
+            
+            if dotWithReturn < 0 then
+                -- Target is further out of bounds - walk inward instead
+                Camera.CFrame = CFrame.lookAt(myPos, myPos + returnDir * 50)
+            else
+                -- Target is toward center - walk toward target
+                Camera.CFrame = CFrame.lookAt(myPos, myPos + toTarget * 50)
+            end
         else
-            local returnDir = getBoundaryReturnDirection(myPos)
             Camera.CFrame = CFrame.lookAt(myPos, myPos + returnDir * 50)
-            pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
         end
         
+        pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
         updateDebugGui("STATE: BOUNDARY_WALK\nNear map edge - ground only")
         return
     end
@@ -2368,18 +2604,26 @@ At retreat distance - idling on ground...
         return
     end
     
-    -- DIVING STATE (Change #1: Dive into river before combat)
-    -- Must enter water before doing river combat
+    -- DIVING STATE - Flying toward river to engage underwater combat
+    -- Keep flight ON, aim at target, dive into water
     if S.riverMethodActive and S.waterState == "DRY" and not S.resurfaceMode then
         S.currentState = "DIVING"
         
         -- Keep flight ON during dive approach
-        ensureFlight()
+        local isFlying = ensureFlight()
         
-        -- Aim toward target XZ with no forced pitch (horizontal only)
+        -- Aim toward target (can be above river surface)
         if targetPos then
-            local dir = safeUnit(targetPos - myPos)
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + dir * 50)
+            local toTarget = safeUnit(targetPos - myPos)
+            Camera.CFrame = CFrame.lookAt(myPos, myPos + toTarget * 50)
+            
+            -- Keep mouse on target for early grabs if in range
+            local screenPos, onScreen = Camera:WorldToViewportPoint(targetPos)
+            if onScreen then
+                pcall(function()
+                    VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
+                end)
+            end
         end
         
         pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
@@ -2390,20 +2634,32 @@ Flying toward river...
 Water State: %s
 Target in river: YES
 Distance: %.1f
+Flying: %s
 ]], 
             S.waterState,
-            distance
+            distance,
+            tostring(isFlying)
         )
         updateDebugGui(debugInfo)
         return
     end
     
     -- RIVER COMBAT (Change #2: Only run when actually in water)
+    -- Dynamic flight: fly when stamina available, walk when not, fly again when recovered
     if S.riverMethodActive and (S.waterState == "SURFACE" or S.waterState == "UNDERWATER") then
         S.currentState = "RIVER_COMBAT"
         
-          ensureFlight()
-
+        -- Dynamic flight management - fly when we have stamina
+        local stamina = getStamina()
+        local canFly = stamina and stamina > getEffectiveStaminaMin()
+        local isFlying = false
+        
+        if canFly and not S.flightDisabledForStamina then
+            isFlying = ensureFlight()
+        else
+            disableFlight()
+        end
+        
         -- Attempt attack if conditions met
         if targetPos then
             local canAttack, reason = canAttackNow(myPos, targetPos)
@@ -2412,9 +2668,20 @@ Distance: %.1f
             end
         end
         
-        -- Dolphin movement toward target
-        local toTarget = safeUnit(targetPos - myPos)
-        Camera.CFrame = CFrame.lookAt(myPos, myPos + toTarget * 50)
+        -- Dolphin movement toward target (aim at target, can be above water surface)
+        if targetPos then
+            local toTarget = safeUnit(targetPos - myPos)
+            Camera.CFrame = CFrame.lookAt(myPos, myPos + toTarget * 50)
+            
+            -- Keep mouse on target for grabs
+            local screenPos, onScreen = Camera:WorldToViewportPoint(targetPos)
+            if onScreen then
+                pcall(function()
+                    VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
+                end)
+            end
+        end
+        
         pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
         
         local debugInfo = string.format([[
@@ -2422,10 +2689,13 @@ STATE: RIVER_COMBAT
 Air: %.1f / %.1f
 Distance: %.1f
 Water State: %s
+Flying: %s (stamina: %.0f)
 ]], 
             S.airRemaining, CONFIG.UNDERWATER_MAX_TIME,
             distance,
-            S.waterState
+            S.waterState,
+            tostring(isFlying),
+            stamina or 0
         )
         updateDebugGui(debugInfo)
         return
@@ -2448,7 +2718,25 @@ Water State: %s
             Camera.CFrame = CFrame.lookAt(myPos, myPos + dir * 50)
             pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
             
-            updateDebugGui("STATE: UNSTICKING\nFinding clear path...")
+            -- Still allow attacks while unsticking if target is in range
+            if targetPos and S.targetAvailable then
+                -- Keep mouse on target for grabs
+                local targetHead = getHead(getCurrentTarget())
+                local aimPoint = targetHead and targetHead.Position or targetPos
+                local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
+                if onScreen then
+                    pcall(function()
+                        VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
+                    end)
+                end
+                
+                local canAttack, reason = canAttackNow(myPos, targetPos)
+                if canAttack then
+                    executeAttack(myPos, targetPos, distance)
+                end
+            end
+            
+            updateDebugGui("STATE: UNSTICKING\nFinding clear path...\n(Still attacking if in range)")
             return
         end
     end
@@ -2485,6 +2773,14 @@ Water State: %s
         if aimPoint then
             aimPoint = aimPoint + CONFIG.COMBAT_CAM_OFFSET
             updateCombatCameraLock(myPos, aimPoint, CONFIG.COMBAT_CAM_SMOOTHNESS)
+            
+            -- Keep virtual mouse locked on target every frame
+            local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
+            if onScreen then
+                pcall(function()
+                    VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
+                end)
+            end
         end
         -- During combat lock, we skip the normal flight steering camera updates
         -- but still do movement inputs
@@ -2727,16 +3023,20 @@ UserInputService.InputBegan:Connect(function(input, processed)
     
     elseif input.KeyCode == Enum.KeyCode.M then
         -- Add/remove secondary target
-         local target = getClosestPlayerToCursor()
-    if target then
-        if S.targetPlayer and target == S.targetPlayer then
-            print("Cannot add primary as secondary")
+        if S.following then
+            local target = getClosestPlayerToCursor()
+            if target then
+                if target == S.targetPlayer then
+                    print("Cannot add primary as secondary")
+                else
+                    toggleSecondaryTarget(target)
+                end
+            else
+                warn("No player found near cursor")
+            end
         else
-            toggleSecondaryTarget(target)
+            warn("Not following - press N first")
         end
-    else
-        warn("No player found near cursor")
-    end
     
     elseif input.KeyCode == Enum.KeyCode.L then
         -- Clear all secondaries
