@@ -33,7 +33,7 @@ local CONFIG = {
     SECONDARY_TARGET_RANGE = 200,
     
     -- Timing
-    Q_CLICK_COOLDOWN = 1.5,
+    Q_CLICK_COOLDOWN = 1.4,
     TARGET_CHECK_RATE = 0.1,
     FLIGHT_TOGGLE_COOLDOWN = 1,
     WATER_STATE_UPDATE_RATE = 0.1,  -- Check water state every 0.1s for reliable air tracking
@@ -66,8 +66,8 @@ local CONFIG = {
     -- River System (Section 5)
     RIVER_X_MIN = -550,
     RIVER_X_MAX = -100,
-    RIVER_Z_MIN = -740,
-    RIVER_Z_MAX = 580,
+    RIVER_Z_MIN = -735,
+    RIVER_Z_MAX = 577,
     RIVER_SURFACE_Y = -40,
     RIVER_EXIT_HEIGHT = 20,
     RIVER_COMMIT_TIME = 1.0,
@@ -100,16 +100,16 @@ local CONFIG = {
     -- Stuck Detection (Section 19.3)
     STUCK_VELOCITY_THRESHOLD = 3,
     STUCK_TIME_THRESHOLD = 0.4,
-    UNSTUCK_DURATION = 3,
+    UNSTUCK_DURATION = 1,
     UNSTUCK_SCAN_POINTS = 40,
     UNSTUCK_SCAN_DISTANCE = 100,
     
     -- Map Boundary (Section 19)
-    MAP_X_MIN = -972,
-    MAP_X_MAX = 603,
-    MAP_Z_MIN = -708,
-    MAP_Z_MAX = 556,
-    MAP_BOUNDARY_BUFFER = 50,
+    MAP_X_MIN = -999,
+    MAP_X_MAX = 614,
+    MAP_Z_MIN = -735,
+    MAP_Z_MAX = 577,
+    MAP_BOUNDARY_BUFFER = 5,
     
     -- No-Chase Zones (Section 20.0)
     HOUSE_CENTER = Vector3.new(-59.50, 71.67, -431.95),
@@ -129,11 +129,13 @@ local CONFIG = {
     UNAVAILABLE_STAY_RANGE = 50,
     INVISIBILITY_GRACE_WINDOW = 0.5,
     PERSISTENT_NO_LOS_THRESHOLD = 1.5,
+    STRUCTURE_CHECK_RATE = 0.25,  -- Only check structure/availability 4 times per second
+    LOS_CACHE_RATE = 0.1,  -- Cache LOS results for 0.1s
     INSIDE_BOULDER_THRESHOLD = 25,  -- Max distance for inside-boulder detection
     
     -- Taunts
     TAUNT_MIN_DELAY = 1.0,
-    TAUNT_MAX_DELAY = 1.5,
+    TAUNT_MAX_DELAY = 3,
     TAUNT_RANGE = 100,
     
     -- Shield (Section 10)
@@ -201,6 +203,9 @@ local S = {
     unavailableReason = nil,
     structureTrappedTimer = 0,
     lastLOSFailTime = 0,
+    lastStructureCheck = 0,  -- Throttle for updateStructureTrapped
+    lastLOSCheckTime = 0,    -- Cache for LOS checks
+    lastLOSResult = false,   -- Cached LOS result
     
     -- Flight steering (Section 18)
     steeringMode = "SLOPE", -- ARC or SLOPE
@@ -1112,7 +1117,7 @@ local function isTargetAvailable(plr)
     }
     
     -- Raycast straight up from target head with classification
-    local upHit = classifiedRaycast(targetPos, Vector3.new(0, 200, 0), filterList)
+    local upHit = classifiedRaycast(targetPos, Vector3.new(0, 140, 0), filterList)
     
     -- Check if Flyro dome (dual-signal check)
     if isInFlyroShield(targetPos) then
@@ -1174,7 +1179,7 @@ local function isTargetUnderMap()
     end
     
     -- Signal B: Check what's directly above target (NOT adjusted - stay true to geometry)
-    local signalB = classifiedRaycast(targetPos, Vector3.new(0, 200, 0), filterList)
+    local signalB = classifiedRaycast(targetPos, Vector3.new(0, 140, 0), filterList)
     
     -- Signal B must hit TERRAIN specifically
     if signalB.hitClass ~= "TERRAIN" then
@@ -2037,6 +2042,9 @@ end
 -- =====================================================
 
 local function canAttackNow(myPos, targetPos)
+    -- Prevent overlapping attacks (race condition with task.wait in executeAttack)
+    if S.isAttacking then return false, "ATTACKING" end
+    
     local target = getCurrentTarget()
     if not target then return false, "NO_TARGET" end
     if not isPlayerAlive(target) then return false, "TARGET_DEAD" end
@@ -2050,10 +2058,15 @@ local function canAttackNow(myPos, targetPos)
     local canGrab, shieldReason = canGrabTarget(myPos, targetPos)
     if not canGrab then return false, shieldReason end
     
-    -- LOS check
-    local myRoot = getRoot(player)
-    local targetRoot = getRoot(target)
-    if not hasCompleteLineOfSight(myRoot, targetRoot) then
+    -- LOS check (cached to reduce raycast spam)
+    local now = tick()
+    if now - S.lastLOSCheckTime > CONFIG.LOS_CACHE_RATE then
+        S.lastLOSCheckTime = now
+        local myRoot = getRoot(player)
+        local targetRoot = getRoot(target)
+        S.lastLOSResult = hasCompleteLineOfSight(myRoot, targetRoot)
+    end
+    if not S.lastLOSResult then
         return false, "NO_LOS"
     end
     
@@ -2360,8 +2373,12 @@ local function processMovementFrame(dt)
         updateRiverMethodState(targetPos, tick())
     end
     
-    -- Update target availability
-    updateStructureTrapped()
+    -- Update target availability (throttled to reduce raycast spam)
+    local now = tick()
+    if now - S.lastStructureCheck >= CONFIG.STRUCTURE_CHECK_RATE then
+        S.lastStructureCheck = now
+        updateStructureTrapped()
+    end
     
     -- Update secondary target logic
     updateSecondaryTargetLogic(myPos)
@@ -2900,6 +2917,9 @@ local function startFollowing()
     S.unavailableReason = nil
     S.structureTrappedTimer = 0
     S.lastLOSFailTime = 0
+    S.lastStructureCheck = 0
+    S.lastLOSCheckTime = 0
+    S.lastLOSResult = false
     
     S.steeringMode = "SLOPE"
     S.flightDisabledForStamina = false
