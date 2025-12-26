@@ -112,7 +112,7 @@ local CONFIG = {
     MAP_X_MIN = -1024.84,
     MAP_X_MAX = 637.40,
     MAP_Z_MIN = -781.47,
-    MAP_Z_MAX = -574.01,
+    MAP_Z_MAX = 574.01,
     MAP_BOUNDARY_BUFFER = 1,
     
     -- No-Chase Zones (Section 20.0)
