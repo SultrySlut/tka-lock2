@@ -113,7 +113,7 @@ local CONFIG = {
     MAP_X_MAX = 614,
     MAP_Z_MIN = -735,
     MAP_Z_MAX = 577,
-    MAP_BOUNDARY_BUFFER = 50,
+    MAP_BOUNDARY_BUFFER = 1,
     
     -- No-Chase Zones (Section 20.0)
     HOUSE_CENTER = Vector3.new(-59.50, 71.67, -431.95),
