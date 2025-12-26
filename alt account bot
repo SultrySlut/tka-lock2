@@ -26,17 +26,17 @@ local player = Players.LocalPlayer
 local CONFIG = {
     -- Distance thresholds
     OPTIMAL_MIN = 54,
-    OPTIMAL_MAX = 73.3,
+    OPTIMAL_MAX = 73,
     OPTIMAL_MID = 60,
     COMBAT_ZONE = 76,
     SECONDARY_TARGET_RANGE = 200,
     
     -- Timing
-    Q_CLICK_COOLDOWN = 1.5,
+    Q_CLICK_COOLDOWN = 1.45,
     
     -- Q Attack Timing (in seconds)
-    Q_AIM_DELAY = 0.05,       -- Wait after moving mouse to target
-    Q_HOLD_BEFORE_CLICK = 0.5,  -- How long to hold Q before clicking
+    Q_AIM_DELAY = 0.00005,       -- Wait after moving mouse to target
+    Q_HOLD_BEFORE_CLICK = 0.9,  -- How long to hold Q before clicking
     Q_HOLD_AFTER_CLICK = 0.005,   -- How long to hold Q after clicking before release
     TARGET_CHECK_RATE = 0.01,
     FLIGHT_TOGGLE_COOLDOWN = 1,
