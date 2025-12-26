@@ -28,7 +28,7 @@ local CONFIG = {
     OPTIMAL_MIN = 54,
     OPTIMAL_MAX = 73,
     OPTIMAL_MID = 60,
-    COMBAT_ZONE = 76,
+    COMBAT_ZONE = 100,
     SECONDARY_TARGET_RANGE = 200,
     
     -- Timing
