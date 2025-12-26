@@ -1,7 +1,6 @@
 
 
 loadstring(game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/the%20stuff"))()
-
 -- =====================================================
 -- AltFollow Script v6.0 - Full Specification Implementation
 -- Water, River, LOS, Shield, Availability, State Machine
@@ -33,7 +32,12 @@ local CONFIG = {
     SECONDARY_TARGET_RANGE = 200,
     
     -- Timing
-    Q_CLICK_COOLDOWN = 1.4,
+    Q_CLICK_COOLDOWN = 1.5,
+    
+    -- Q Attack Timing (in seconds)
+    Q_AIM_DELAY = 0.02,       -- Wait after moving mouse to target
+    Q_HOLD_BEFORE_CLICK = 0.5,  -- How long to hold Q before clicking
+    Q_HOLD_AFTER_CLICK = 0.05,   -- How long to hold Q after clicking before release
     TARGET_CHECK_RATE = 0.1,
     FLIGHT_TOGGLE_COOLDOWN = 1,
     WATER_STATE_UPDATE_RATE = 0.1,  -- Check water state every 0.1s for reliable air tracking
@@ -100,7 +104,7 @@ local CONFIG = {
     -- Stuck Detection (Section 19.3)
     STUCK_VELOCITY_THRESHOLD = 3,
     STUCK_TIME_THRESHOLD = 0.4,
-    UNSTUCK_DURATION = 1,
+    UNSTUCK_DURATION = 3,
     UNSTUCK_SCAN_POINTS = 40,
     UNSTUCK_SCAN_DISTANCE = 100,
     
@@ -109,7 +113,7 @@ local CONFIG = {
     MAP_X_MAX = 614,
     MAP_Z_MIN = -735,
     MAP_Z_MAX = 577,
-    MAP_BOUNDARY_BUFFER = 5,
+    MAP_BOUNDARY_BUFFER = 50,
     
     -- No-Chase Zones (Section 20.0)
     HOUSE_CENTER = Vector3.new(-59.50, 71.67, -431.95),
@@ -135,7 +139,7 @@ local CONFIG = {
     
     -- Taunts
     TAUNT_MIN_DELAY = 1.0,
-    TAUNT_MAX_DELAY = 3,
+    TAUNT_MAX_DELAY = 1.5,
     TAUNT_RANGE = 100,
     
     -- Shield (Section 10)
@@ -2112,11 +2116,11 @@ local function executeAttack(myPos, targetPos, distance)
     pcall(function()
         VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
     end)
-    task.wait(0.02)
+    task.wait(CONFIG.Q_AIM_DELAY)
     
     -- 4. Hold Q (begin grab)
     pressKey(Enum.KeyCode.Q)
-    task.wait(0.05)
+    task.wait(CONFIG.Q_HOLD_BEFORE_CLICK)
     
     -- 5. Click with offset for throw direction control (Section 15)
     local vp = Camera.ViewportSize
@@ -2145,7 +2149,7 @@ local function executeAttack(myPos, targetPos, distance)
     -- Click at calculated position
     sendClickAt(clickX, clickY)
     
-    task.wait(0.05)
+    task.wait(CONFIG.Q_HOLD_AFTER_CLICK)
     releaseKey(Enum.KeyCode.Q)
     
     S.isAttacking = false
