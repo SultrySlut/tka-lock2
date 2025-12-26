@@ -2058,8 +2058,9 @@ local function canAttackNow(myPos, targetPos)
     end
     
     -- Availability check
-    local available, reason = isTargetAvailable(target)
-    if not available then return false, reason end
+    if not S.targetAvailable then 
+        return false, S.unavailableReason or "UNAVAILABLE"
+    end
     
     -- Shield permission
     local canGrab, shieldReason = canGrabTarget(myPos, targetPos)
