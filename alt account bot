@@ -902,6 +902,18 @@ end
 -- SECTION 10: SHIELD SYSTEM (Spec Section 10)
 -- =====================================================
 
+local function hasMarkerChild(hitPart, markerName)
+    if not hitPart then return false end
+    if hitPart:FindFirstChild(markerName) then
+        return true
+    end
+    local parent = hitPart.Parent
+    if parent and parent:FindFirstChild(markerName) then
+        return true
+    end
+    return false
+end
+
 local function getShieldParts()
     local world = workspace:FindFirstChild("World")
     return world and world:FindFirstChild("ShieldParts")
@@ -926,23 +938,11 @@ local function isInFlyroShield(targetPos)
     -- Signal A: Does ray from alt to target hit a Flyro shield?
     local dirToTarget = targetPos - myPos
     local resultA = workspace:Raycast(myPos, dirToTarget, raycastParams)
-    local signalA = false
-    if resultA and resultA.Instance then
-        local parent = resultA.Instance.Parent
-        if parent and parent:FindFirstChild("Forceshield") then
-            signalA = true
-        end
-    end
+    local signalA = resultA and hasMarkerChild(resultA.Instance, "Forceshield")
     
     -- Signal B: Is there a Forceshield above the target?
     local resultB = workspace:Raycast(targetPos, Vector3.new(0, 50, 0), raycastParams)
-    local signalB = false
-    if resultB and resultB.Instance then
-        local parent = resultB.Instance.Parent
-        if parent and parent:FindFirstChild("Forceshield") then
-            signalB = true
-        end
-    end
+    local signalB = resultB and hasMarkerChild(resultB.Instance, "Forceshield")
     
     -- Both signals must detect Flyro shield
     return signalA and signalB
@@ -964,13 +964,10 @@ local function checkShieldBlocking(fromPos, toPos)
     
     local result = workspace:Raycast(fromPos, dir, raycastParams)
     if result and result.Instance then
-        local parent = result.Instance.Parent
-        if parent then
-            if parent:FindFirstChild("Forceshield") then
-                return "FLYRO"
-            elseif parent:FindFirstChild("Telekinesis") then
-                return "TELEK"
-            end
+        if hasMarkerChild(result.Instance, "Forceshield") then
+            return "FLYRO"
+        elseif hasMarkerChild(result.Instance, "Telekinesis") then
+            return "TELEK"
         end
     end
     return nil
