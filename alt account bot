@@ -35,8 +35,8 @@ local CONFIG = {
     Q_CLICK_COOLDOWN = 1.45,
     
     -- Q Attack Timing (in seconds)
-    Q_AIM_DELAY = 0.5,       -- Wait after moving mouse to target
-    Q_HOLD_BEFORE_CLICK = 0.5,  -- How long to hold Q before clicking
+    Q_AIM_DELAY = 0.1,       -- Wait after moving mouse to target
+    Q_HOLD_BEFORE_CLICK = 0.2,  -- How long to hold Q before clicking
     Q_HOLD_AFTER_CLICK = 0.2,   -- How long to hold Q after clicking before release
     TARGET_CHECK_RATE = 0.01,
     FLIGHT_TOGGLE_COOLDOWN = 1,
@@ -2050,6 +2050,12 @@ local function canAttackNow(myPos, targetPos)
     if not target then return false, "NO_TARGET" end
     if not isPlayerAlive(target) then return false, "TARGET_DEAD" end
     if updateInvisibilityState(target) then return false, "TARGET_INVISIBLE" end
+
+    -- Distance check - must be in combat range
+    local distance = (myPos - targetPos).Magnitude
+    if distance > CONFIG.COMBAT_ZONE then
+        return false, "OUT_OF_RANGE"
+    end
     
     -- Availability check
     local available, reason = isTargetAvailable(target)
