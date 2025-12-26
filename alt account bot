@@ -2478,29 +2478,15 @@ Emergency: %s
     if S.nearBoundary then
         S.currentState = "BOUNDARY_WALK"
         disableFlight()
-        
+    
+        -- Always walk toward center - ignore target until safe
         local returnDir = getBoundaryReturnDirection(myPos)
-        
-        if targetPos then
-            local toTarget = safeUnit(targetPos - myPos)
-            -- Check if target direction goes more out of bounds
-            local dotWithReturn = toTarget:Dot(returnDir)
-            
-            if dotWithReturn < 0 then
-                -- Target is further out of bounds - walk inward instead
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + returnDir * 50)
-            else
-                -- Target is toward center - walk toward target
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + toTarget * 50)
-            end
-        else
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + returnDir * 50)
-        end
-        
+        Camera.CFrame = CFrame.lookAt(myPos, myPos + returnDir * 50)
         pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
-        updateDebugGui("STATE: BOUNDARY_WALK\nNear map edge - ground only")
+    
+        updateDebugGui("STATE: BOUNDARY_WALK\nNear map edge - returning to safe zone...")
         return
-    end
+end
     
     -- NO TARGET or TARGET DEAD
     if not target or S.targetWasDead then
