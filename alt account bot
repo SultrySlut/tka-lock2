@@ -1147,70 +1147,54 @@ end
 -- 11.5 Under-Map Detection (Two-Signal Rule with Proper Classification)
 -- BOTH signals must hit TERRAIN specifically (not bridges/trees/roofs)
 -- Signal B must also pass near-ceiling guard (within 25-40 studs)
-local CONFIG_UNDERMAP_CEILING_MAX = 40  -- Signal B must hit within this distance
-local CONFIG_UNDERMAP_SAME_AREA_MAX = 60  -- Optional: hits must be near target
 
+-- 11.5 Under-Map Detection (Voxel-based)
+-- Checks if target head is inside solid terrain
 local function isTargetUnderMap()
-    local myPos = getMyPosition()
-    local target = S.targetPlayer  -- Use S.targetPlayer directly (getCurrentTarget not defined yet)
-    local targetHead = target and getHead(target)
-    if not myPos or not targetHead then return false end
+    local target = S.targetPlayer
+    if not target then return false end
     
-    local targetPos = targetHead.Position
-    if not isValidVector(targetPos) then return false end
+    local targetHead = getHead(target)
+    if not targetHead then return false end
     
-    -- Build filter (characters and shields - we're looking for terrain)
-    local filterList = { workspace:FindFirstChild("Characters") }
-    local shieldParts = getShieldParts()
-    if shieldParts then table.insert(filterList, shieldParts) end
+    local pos = targetHead.Position
+    if not isValidVector(pos) then return false end
     
-    -- Apply river-aware offset to Signal A ONLY (not Signal B vertical ray)
-    local signalAFrom, signalATo = myPos, targetPos
-    if shouldApplyRiverLOSOffset() then
-        signalAFrom = myPos + Vector3.new(0, RIVER_LOS_FROM_OFFSET, 0)
-        signalATo = targetPos + Vector3.new(0, RIVER_LOS_TO_OFFSET, 0)
+    -- Read terrain voxel at target head position
+    local s = 2
+    local region = Region3.new(
+        pos - Vector3.new(s, s, s),
+        pos + Vector3.new(s, s, s)
+    ):ExpandToGrid(4)
+    
+    local ok, materials, occupancy = pcall(function()
+        return Terrain:ReadVoxels(region, 4)
+    end)
+    
+    if not ok or not materials or not occupancy then return false end
+    
+    -- Get center voxel
+    local sx = #materials
+    local sy = #materials[1] 
+    local sz = #materials[1][1]
+    local cx = math.floor((sx + 1) / 2)
+    local cy = math.floor((sy + 1) / 2)
+    local cz = math.floor((sz + 1) / 2)
+    
+    local mat = materials[cx][cy][cz]
+    local occ = occupancy[cx][cy][cz]
+    
+    -- Under map if inside solid terrain (not air/water) with high occupancy
+    if mat ~= Enum.Material.Air and mat ~= Enum.Material.Water and occ >= 0.9 then
+        return true
     end
     
-    -- Signal A: Check what blocks line between alt and target (river-adjusted)
-    local signalA = classifiedRaycast(signalAFrom, signalATo - signalAFrom, filterList)
-    
-    -- Signal A must hit TERRAIN specifically
-    if signalA.hitClass ~= "TERRAIN" then
-        return false
-    end
-    
-    -- Signal B: Check what's directly above target (NOT adjusted - stay true to geometry)
-    local signalB = classifiedRaycast(targetPos, Vector3.new(0, 140, 0), filterList)
-    
-    -- Signal B must hit TERRAIN specifically
-    if signalB.hitClass ~= "TERRAIN" then
-        return false
-    end
-    
-    -- Near-ceiling guard: Signal B must be close (not distant terrain)
-    if signalB.hitDistance > CONFIG_UNDERMAP_CEILING_MAX then
-        return false
-    end
-    
-    -- Optional: Same-area sanity check
-    -- Both hits should be spatially consistent with target area
-    if signalA.hitPosition and signalB.hitPosition then
-        local distA = (signalA.hitPosition - targetPos).Magnitude
-        local distB = (signalB.hitPosition - targetPos).Magnitude
-        
-        -- If either hit is very far from target, might be unrelated obstruction
-        if distA > CONFIG_UNDERMAP_SAME_AREA_MAX and distB > CONFIG_UNDERMAP_SAME_AREA_MAX then
-            return false
-        end
-    end
-    
-    -- Both signals hit TERRAIN, Signal B is close = under-map confirmed
-    return true
+    return false
 end
 
 -- 11.5.2 Inside-Boulder Detection (Dual-Signal)
 -- Signal A: Ray from alt to target hits BOULDER
--- Signal B: Ray above target hits BOULDER within threshold
+-- Signal B: Overhead ray hits boulder BEFORE target character
 local function isTargetInsideBoulder()
     local target = S.targetPlayer
     local targetHead = target and getHead(target)
@@ -1220,8 +1204,10 @@ local function isTargetInsideBoulder()
     if not myPos then return false end
     
     local targetPos = targetHead.Position
+    local targetChar = getChar(target)
+    if not targetChar then return false end
     
-    -- Build filter (characters only - detect everything else)
+    -- Build filter for Signal A (characters only - detect everything else)
     local filterList = { workspace:FindFirstChild("Characters") }
     
     -- Signal A: Does ray from alt to target hit a BOULDER?
@@ -1230,18 +1216,46 @@ local function isTargetInsideBoulder()
         return false
     end
     
-    -- Signal B: Is there a BOULDER above the target within threshold?
-    local signalB = classifiedRaycast(targetPos, Vector3.new(0, CONFIG.INSIDE_BOULDER_THRESHOLD, 0), filterList)
-    if signalB.hitClass ~= "BOULDER" then
-        return false
+    -- Signal B: Overhead ray - does boulder get hit before target character?
+    local includeList = {}
+    
+    -- Add target character parts
+    for _, part in ipairs(targetChar:GetDescendants()) do
+        if part:IsA("BasePart") then
+            table.insert(includeList, part)
+        end
     end
     
-    -- Near-ceiling guard: Signal B must be close
-    if signalB.hitDistance > CONFIG.INSIDE_BOULDER_THRESHOLD then
-        return false
+    -- Add boulders/rocks from World
+    local world = workspace:FindFirstChild("World")
+    if world then
+        for _, obj in ipairs(world:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                local nameLower = obj.Name:lower()
+                if nameLower:find("boulder") or nameLower:find("rock") or nameLower:find("stone") then
+                    table.insert(includeList, obj)
+                end
+            end
+        end
     end
     
-    -- Both signals hit BOULDER = inside boulder confirmed
+    if #includeList == 0 then return false end
+    
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Include
+    rayParams.FilterDescendantsInstances = includeList
+    
+    -- Cast from 20 studs above head, going down
+    local origin = targetPos + Vector3.new(0, 20, 0)
+    local direction = Vector3.new(0, -40, 0)
+    
+    local result = workspace:Raycast(origin, direction, rayParams)
+    
+    -- Signal B passes if we hit boulder before target character
+    if not result then return false end
+    if result.Instance:IsDescendantOf(targetChar) then return false end
+    
+    -- Both signals confirm boulder = inside boulder
     return true
 end
 
