@@ -35,10 +35,10 @@ local CONFIG = {
     Q_CLICK_COOLDOWN = 1.5,
     
     -- Q Attack Timing (in seconds)
-    Q_AIM_DELAY = 0.02,       -- Wait after moving mouse to target
+    Q_AIM_DELAY = 0.05,       -- Wait after moving mouse to target
     Q_HOLD_BEFORE_CLICK = 0.5,  -- How long to hold Q before clicking
-    Q_HOLD_AFTER_CLICK = 0.05,   -- How long to hold Q after clicking before release
-    TARGET_CHECK_RATE = 0.1,
+    Q_HOLD_AFTER_CLICK = 0.005,   -- How long to hold Q after clicking before release
+    TARGET_CHECK_RATE = 0.01,
     FLIGHT_TOGGLE_COOLDOWN = 1,
     WATER_STATE_UPDATE_RATE = 0.1,  -- Check water state every 0.1s for reliable air tracking
     LOS_CACHE_WINDOW = 0.25,
