@@ -32,7 +32,7 @@ local CONFIG = {
     SECONDARY_TARGET_RANGE = 200,
     
     -- Timing
-    Q_CLICK_COOLDOWN = 1.71,
+    Q_CLICK_COOLDOWN = 1.65,
     
     -- Q Attack Timing (in seconds)
     Q_AIM_DELAY = 0.1,       -- Wait after moving mouse to target
@@ -2059,6 +2059,7 @@ end
 local function canAttackNow(myPos, targetPos)
     -- Prevent overlapping attacks (race condition with task.wait in executeAttack)
     if S.isAttacking then return false, "ATTACKING" end
+    if not myPos or not targetPos then return false, "NO_POSITION" end
     
     local target = getCurrentTarget()
     if not target then return false, "NO_TARGET" end
@@ -3051,19 +3052,15 @@ UserInputService.InputBegan:Connect(function(input, processed)
     
     elseif input.KeyCode == Enum.KeyCode.M then
         -- Add/remove secondary target
-        if S.following then
-            local target = getClosestPlayerToCursor()
-            if target then
-                if target == S.targetPlayer then
-                    print("Cannot add primary as secondary")
-                else
-                    toggleSecondaryTarget(target)
-                end
+        local target = getClosestPlayerToCursor()
+        if target then
+            if target == S.targetPlayer then
+                print("Cannot add primary as secondary")
             else
-                warn("No player found near cursor")
+                toggleSecondaryTarget(target)
             end
         else
-            warn("Not following - press N first")
+            warn("No player found near cursor")
         end
     
     elseif input.KeyCode == Enum.KeyCode.L then
