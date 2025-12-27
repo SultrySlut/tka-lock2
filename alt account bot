@@ -36,7 +36,7 @@ local CONFIG = {
     Q_CLICK_COOLDOWN = 1.5,
     
     -- Q Attack Timing (in seconds)
-    Q_AIM_DELAY = 0,       -- Wait after moving mouse to target
+    Q_AIM_DELAY = 0.4,       -- Wait after moving mouse to target
     Q_HOLD_BEFORE_CLICK = 0.2,  -- How long to hold Q before clicking
     Q_HOLD_AFTER_CLICK = 1,   -- How long to hold Q after clicking before release
     TARGET_CHECK_RATE = 0.01,
