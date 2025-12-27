@@ -2061,6 +2061,12 @@ local function canAttackNow(myPos, targetPos)
     -- Prevent overlapping attacks (race condition with task.wait in executeAttack)
     if S.isAttacking then return false, "ATTACKING" end
     if not myPos or not targetPos then return false, "NO_POSITION" end
+
+    -- Stamina check - need enough to grab
+    local stamina = getStamina()
+    if stamina and stamina < 11.5 then
+        return false, "LOW_STAMINA"
+    end
     
     local target = getCurrentTarget()
     if not target then return false, "NO_TARGET" end
