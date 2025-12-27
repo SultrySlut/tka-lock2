@@ -25,6 +25,7 @@ local player = Players.LocalPlayer
 
 local CONFIG = {
     -- Distance thresholds
+    OPTIMAL_DISTANCE = 63,  -- Push if closer, pull if farther
     OPTIMAL_MIN = 54,
     OPTIMAL_MAX = 74,
     OPTIMAL_MID = 60,
@@ -2141,28 +2142,32 @@ local function executeAttack(myPos, targetPos, distance)
     pressKey(Enum.KeyCode.Q)
     task.wait(CONFIG.Q_HOLD_BEFORE_CLICK)
     
-    -- 5. Click with offset for throw direction control (Section 15)
-    local vp = Camera.ViewportSize
-    local clickX = screenPos.X
-    local clickY = screenPos.Y
+    -- 5. Re-calculate screen position (ALT moved during hold)
+    local screenPos2, onScreen2 = Camera:WorldToViewportPoint(aimPoint)
+    if not onScreen2 then
+        releaseKey(Enum.KeyCode.Q)
+        S.isAttacking = false
+        return false
+    end
     
-    if distance < CONFIG.OPTIMAL_MIN then
-        -- Too close: push away (click above target)
-        clickY = math.max(10, screenPos.Y - CONFIG.CLICK_ABOVE_OFFSET)
+    -- Re-aim mouse to updated position
+    pcall(function()
+        VirtualInputManager:SendMouseMoveEvent(screenPos2.X, screenPos2.Y, game)
+    end)
+    
+    -- 6. Click with offset for throw direction control
+    local vp = Camera.ViewportSize
+    local clickX = screenPos2.X
+    local clickY = screenPos2.Y
+    
+    if distance < CONFIG.OPTIMAL_DISTANCE then
+        -- Too close: push away
+        clickY = math.max(10, screenPos2.Y - CONFIG.CLICK_ABOVE_OFFSET)
         S.throwPhase = "PUSH"
-    elseif distance > CONFIG.OPTIMAL_MAX then
-        -- Too far: pull toward (click below target)
-        clickY = math.min(vp.Y - 10, screenPos.Y + CONFIG.CLICK_BELOW_OFFSET)
-        S.throwPhase = "PULL"
     else
-        -- In optimal range: alternate
-        if S.throwPhase == "PULL" then
-            clickY = math.max(10, screenPos.Y - CONFIG.CLICK_ABOVE_OFFSET)
-            S.throwPhase = "PUSH"
-        else
-            clickY = math.min(vp.Y - 10, screenPos.Y + CONFIG.CLICK_BELOW_OFFSET)
-            S.throwPhase = "PULL"
-        end
+        -- Too far: pull toward
+        clickY = math.min(vp.Y - 10, screenPos2.Y + CONFIG.CLICK_BELOW_OFFSET)
+        S.throwPhase = "PULL"
     end
     
     -- Click at calculated position
