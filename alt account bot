@@ -2198,7 +2198,7 @@ local function sendRandomTaunt()
     local taunt = TAUNTS[math.random(1, #TAUNTS)]
     if getAltHealth() > 80 then
         if math.random() > 0.5 then
-            taunt = "not even close"
+            taunt = "yass girl give us nothing!!"
         end
     end
     sendChat(taunt)
