@@ -139,8 +139,8 @@ local CONFIG = {
     INSIDE_BOULDER_THRESHOLD = 25,  -- Max distance for inside-boulder detection
     
     -- Taunts
-    TAUNT_MIN_DELAY = 1.0,
-    TAUNT_MAX_DELAY = 1.5,
+    TAUNT_MIN_DELAY = 2,
+    TAUNT_MAX_DELAY = 3.5,
     TAUNT_RANGE = 100,
     
     -- Shield (Section 10)
@@ -150,13 +150,13 @@ local CONFIG = {
     SECONDARY_DWELL_TIME = 1.5,
     
     -- Combat Camera Lock
-    COMBAT_CAM_SMOOTHNESS = 0.15,  -- Lower = snappier, higher = smoother (0-1)
+    COMBAT_CAM_SMOOTHNESS = 0.6,  -- Lower = snappier, higher = smoother (0-1)
     COMBAT_CAM_OFFSET = Vector3.new(0, 0, 0),  -- Aim offset from target head
 }
 
 local TAUNTS = {
-    "GG", "ez", "rip", "too easy", "get good", "lol",
-    "nice try", "gg ez", "free", "sit", "back to menu", "yawn",
+    "tried", "ez", "local", "aimless", "trash", "LOL",
+    "cope", "flopped", "newgen", "sit", "HELP", "clocked",
 }
 
 -- =====================================================
