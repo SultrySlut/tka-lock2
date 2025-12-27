@@ -2142,36 +2142,19 @@ local function executeAttack(myPos, targetPos, distance)
     pressKey(Enum.KeyCode.Q)
     task.wait(CONFIG.Q_HOLD_BEFORE_CLICK)
     
-    -- 5. Re-calculate screen position (ALT moved during hold)
-    local screenPos2, onScreen2 = Camera:WorldToViewportPoint(aimPoint)
-    if not onScreen2 then
-        releaseKey(Enum.KeyCode.Q)
-        S.isAttacking = false
-        return false
-    end
-    
-    -- Re-aim mouse to updated position
-    pcall(function()
-        VirtualInputManager:SendMouseMoveEvent(screenPos2.X, screenPos2.Y, game)
-    end)
-    
-    -- 6. Click with offset for throw direction control
+    -- 5. Click above/below center for throw direction
     local vp = Camera.ViewportSize
-    local clickX = screenPos2.X
-    local clickY = screenPos2.Y
+    local cx, cy = vp.X / 2, vp.Y / 2
     
     if distance < CONFIG.OPTIMAL_DISTANCE then
-        -- Too close: push away
-        clickY = math.max(10, screenPos2.Y - CONFIG.CLICK_ABOVE_OFFSET)
+        -- Push: click above center
+        sendClickAt(cx, cy - CONFIG.CLICK_ABOVE_OFFSET)
         S.throwPhase = "PUSH"
     else
-        -- Too far: pull toward
-        clickY = math.min(vp.Y - 10, screenPos2.Y + CONFIG.CLICK_BELOW_OFFSET)
+        -- Pull: click below center
+        sendClickAt(cx, cy + CONFIG.CLICK_BELOW_OFFSET)
         S.throwPhase = "PULL"
     end
-    
-    -- Click at calculated position
-    sendClickAt(clickX, clickY)
     
     task.wait(CONFIG.Q_HOLD_AFTER_CLICK)
     releaseKey(Enum.KeyCode.Q)
