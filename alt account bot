@@ -33,7 +33,7 @@ local CONFIG = {
     SECONDARY_TARGET_RANGE = 200,
     
     -- Timing
-    Q_CLICK_COOLDOWN = 1.4,
+    Q_CLICK_COOLDOWN = 1.3,
     
     -- Q Attack Timing (in seconds)
     Q_AIM_DELAY = 0.1,       -- Wait after moving mouse to target
