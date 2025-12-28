@@ -161,7 +161,7 @@ local State = {
     ESP            = {},   -- [player] = Drawing.Text
     HoverPlayer    = nil,
     TelepathyTogOn = false,
-    AllTargeted    = true -- false = IGNORE-ALL | true = TARGET-ALL
+    AllTargeted    = false -- false = IGNORE-ALL | true = TARGET-ALL
 }
 
 ----------------------------------------------------------------
