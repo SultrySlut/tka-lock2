@@ -2747,6 +2747,62 @@ Flying: %s (stamina: %.0f)
         updateDebugGui(debugInfo)
         return
     end
+-- COMBAT FLOW (main state)
+    S.currentState = "COMBAT_FLOW"
+    
+    -- Handle stuck detection
+    local stuckTime = updateStuckDetection(myPos, dt)
+    if stuckTime > CONFIG.STUCK_TIME_THRESHOLD and not S.isUnsticking then
+        startUnsticking(myPos, targetPos)
+    end
+    
+    if S.isUnsticking then
+        if tick() > S.unstickEndTime then
+            resetStuckDetection()
+        else
+            local dir = S.unstickDirection or Vector3.new(0, 0, 1)
+            Camera.CFrame = CFrame.lookAt(myPos, myPos + dir * 50)
+            pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
+            
+            if targetPos and S.targetAvailable then
+                local targetHead = getHead(getCurrentTarget())
+                local aimPoint = targetHead and targetHead.Position or targetPos
+                local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
+                if onScreen then
+                    pcall(function()
+                        VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
+                    end)
+                end
+                
+                local canAttack, reason = canAttackNow(myPos, targetPos)
+                if canAttack then
+                    executeAttack(myPos, targetPos, distance)
+                end
+            end
+            
+            updateDebugGui("STATE: UNSTICKING\nFinding clear path...")
+            return
+        end
+    end
+    
+    -- Update steering mode
+    updateSteeringMode(hDist)
+    
+    -- Ensure flight if needed
+    local flying = ensureFlight()
+    
+    -- Movement and combat based on distance
+    local combatMode = "IDLE"
+    
+    if distance > CONFIG.COMBAT_ZONE then
+        combatMode = "TRAVEL"
+    elseif distance > CONFIG.OPTIMAL_MAX then
+        combatMode = "APPROACH"
+    elseif distance < CONFIG.OPTIMAL_MIN then
+        combatMode = "TOO_CLOSE"
+    else
+        combatMode = "ATTACK"
+    end
     
  -- Combat Camera Lock - lerp camera toward target during active combat
     local combatActive = (combatMode == "ATTACK" or combatMode == "TOO_CLOSE")
