@@ -25,7 +25,7 @@ local player = Players.LocalPlayer
 
 local CONFIG = {
     -- Distance thresholds
-    OPTIMAL_DISTANCE = 40,  -- Push if closer, pull if farther
+    OPTIMAL_DISTANCE = 64,  -- Push if closer, pull if farther
     OPTIMAL_MIN = 54,
     OPTIMAL_MAX = 74,
     OPTIMAL_MID = 60,
