@@ -3170,7 +3170,13 @@ print(string.rep("=", 55))
 
 local code = game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/the%20stuff")
 
--- Change local function to global function
+-- Check if the string exists
+print("Found 'local function nearestToCursor':", code:find("local function nearestToCursor") ~= nil)
+
 code = code:gsub("local function nearestToCursor", "function nearestToCursor")
 
 loadstring(code)()
+
+-- Check if it's global now
+print("nearestToCursor is global:", nearestToCursor ~= nil)
+print("Type:", type(nearestToCursor))
