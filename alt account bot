@@ -3171,23 +3171,32 @@ print(string.rep("=", 55))
 -- Put at bottom of script
 local TelekinesisEvent = ReplicatedStorage.Remotes:WaitForChild("TelekinesisEvent")
 
+local function fireTelekinesis(hold)
+    local target = getCurrentTarget()
+    if not target then return end
+    
+    local char = getChar(target)
+    if not char then return end
+    
+    local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    if not part then return end
+    
+    local cf = Camera.CFrame
+    TelekinesisEvent:FireServer("Q", hold, cf, part, cf)
+end
+
+-- Listen for virtual AND real Q presses
 UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then return end
-    if input.KeyCode == Enum.KeyCode.Q then
-        local target = getCurrentTarget()
-        if target then
-            local char = getChar(target)
-            local part = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
-            if part then
-                TelekinesisEvent:FireServer("Q", true, Camera.CFrame, part, Camera.CFrame)
-            end
-        end
+    -- Remove the processed check so virtual input works
+    if input.KeyCode == Enum.KeyCode.Q and S.following then
+        fireTelekinesis(true)
     end
 end)
 
 UserInputService.InputEnded:Connect(function(input, processed)
-    if processed then return end
-    if input.KeyCode == Enum.KeyCode.Q then
-        TelekinesisEvent:FireServer("Q", false, Camera.CFrame, workspace.Terrain, Camera.CFrame)
+    if input.KeyCode == Enum.KeyCode.Q and S.following then
+        fireTelekinesis(false)
     end
 end)
+
+print("Telekinesis targeting enabled")
