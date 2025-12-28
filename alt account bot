@@ -2093,7 +2093,6 @@ local function canAttackNow(myPos, targetPos)
     if not onScreen then return false, "OFF_SCREEN" end
     
     -- Cooldown check
-    local now = tick()
     if now - S.lastQClickTime < CONFIG.Q_CLICK_COOLDOWN then
         return false, "COOLDOWN"
     end
@@ -2116,8 +2115,6 @@ local function executeAttack(myPos, targetPos, distance)
         S.isAttacking = false
         return false 
     end
-    
-    S.lastQClickTime = tick()
     
     -- 1. Choose stable aim point (target head)
     local targetHead = getHead(target)
@@ -2184,7 +2181,9 @@ local function executeAttack(myPos, targetPos, distance)
         sendClickAt(cx, cy + CONFIG.CLICK_BELOW_OFFSET)
         S.throwPhase = "PULL"
     end
-    
+
+     S.lastQClickTime = tick()
+
     -- 7. Hold Q after click, then release
     task.wait(CONFIG.Q_HOLD_AFTER_CLICK)
     releaseKey(Enum.KeyCode.Q)
