@@ -1,6 +1,6 @@
 
 
-loadstring(game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/the%20stuff"))()
+
 -- =====================================================
 -- AltFollow Script v6.0 - Full Specification Implementation
 -- Water, River, LOS, Shield, Availability, State Machine
@@ -3166,3 +3166,21 @@ print("  - Full state machine (Section 22)")
 print("")
 print("Comfort range: " .. CONFIG.OPTIMAL_MIN .. "-" .. CONFIG.OPTIMAL_MAX .. " studs")
 print(string.rep("=", 55))
+
+
+loadstring(game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/the%20stuff"))()
+
+-- Override to use locked target (primary or secondary)
+local originalNearestToCursor = nearestToCursor
+nearestToCursor = function()
+    local target = getCurrentTarget()  -- Uses secondary if active, otherwise primary
+    if target then
+        local char = getChar(target)
+        if char then
+            local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+            return target, part
+        end
+    end
+    -- Fallback to original if no locked target
+    return originalNearestToCursor()
+end
