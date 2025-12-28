@@ -2240,7 +2240,7 @@ local function executeAttack(myPos, targetPos, distance)
     -- 5. Wait for grab to connect (check for FollowMouse + Telekinesis)
     local grabConnected = false
     local startTime = tick()
-    local maxWait = 1.5
+    local maxWait = 0.8
     
     while tick() - startTime < maxWait do
         local myRoot = getRoot(player)
