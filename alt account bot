@@ -2155,6 +2155,9 @@ local function executeAttack(myPos, targetPos, distance)
         local targetRoot = getRoot(target)
         local hasTelekinesis = targetRoot and targetRoot:FindFirstChild("Telekinesis")
         
+        -- Debug
+        print("FollowMouse:", hasFollowMouse ~= nil, "Telekinesis:", hasTelekinesis ~= nil)
+        
         if hasFollowMouse and hasTelekinesis then
             grabConnected = true
             break
@@ -2168,6 +2171,8 @@ local function executeAttack(myPos, targetPos, distance)
         S.isAttacking = false
         return false
     end
+    
+    -- 6. Grab connected - click to throw
     
     -- 6. Grab connected - click to throw
     local vp = Camera.ViewportSize
