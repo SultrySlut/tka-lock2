@@ -9,7 +9,7 @@ local Y_MIN = -10000
 local CHECK_RATE = 0.2
 
 -- if character/root/humanoid stays missing for this long (after a short grace), force reset
-local SPAWN_GRACE_TIME = 1.5
+local SPAWN_GRACE_TIME = 2.5
 local NO_ROOT_RESET_TIME = 2.5
 local RESET_COOLDOWN = 3.0
 
