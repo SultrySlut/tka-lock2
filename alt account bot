@@ -3172,15 +3172,18 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/
 
 -- Override to use locked target (primary or secondary)
 local originalNearestToCursor = nearestToCursor
-nearestToCursor = function()
-    local target = getCurrentTarget()  -- Uses secondary if active, otherwise primary
-    if target then
+function nearestToCursor()
+    if S.following and getCurrentTarget() then
+        local target = getCurrentTarget()
         local char = getChar(target)
         if char then
             local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
-            return target, part
+            if part then
+                return target, part
+            end
         end
     end
-    -- Fallback to original if no locked target
     return originalNearestToCursor()
 end
+
+print("nearestToCursor override applied")
