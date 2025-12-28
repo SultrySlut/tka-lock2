@@ -3168,12 +3168,6 @@ print("Comfort range: " .. CONFIG.OPTIMAL_MIN .. "-" .. CONFIG.OPTIMAL_MAX .. " 
 print(string.rep("=", 55))
 
 
--- 1. Fetch and run the loadstring FIRST
-local code = game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/the%20stuff")
-code = code:gsub("local function nearestToCursor", "function nearestToCursor")
-loadstring(code)()
-
--- 2. Then at the BOTTOM of your script (after getCurrentTarget and getChar are defined):
 local originalNearestToCursor = nearestToCursor
 local lastWhitelistedTarget = nil
 
@@ -3181,14 +3175,27 @@ function nearestToCursor()
     if S.following then
         local target = getCurrentTarget()
         if target then
+            -- Remove old target from whitelist
             if lastWhitelistedTarget and lastWhitelistedTarget ~= target then
                 if State and State.Whitelist then
                     State.Whitelist[lastWhitelistedTarget] = false
                 end
+                if State and State.Prefs then
+                    State.Prefs[lastWhitelistedTarget.UserId] = false
+                end
             end
             
-            if State and State.Whitelist then
-                State.Whitelist[target] = true
+            -- Force whitelist current target
+            if State then
+                if State.Whitelist then
+                    State.Whitelist[target] = true
+                end
+                if State.Prefs then
+                    State.Prefs[target.UserId] = true
+                end
+                if State.Characters and not State.Characters[target] then
+                    State.Characters[target] = getChar(target)
+                end
             end
             lastWhitelistedTarget = target
             
