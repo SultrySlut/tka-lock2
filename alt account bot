@@ -996,7 +996,7 @@ local function canGrabTarget(myPos, targetPos)
         end
         
         -- 20% chance per second
-        if now - S.lastTelekRollTime >= 1.0 then
+        if now - S.lastTelekRollTime >= 0.1 then
             S.lastTelekRollTime = now
             if math.random() < CONFIG.TELEK_GRAB_CHANCE then
                 S.telekBlockStartTime = 0
