@@ -2101,35 +2101,20 @@ local function canAttackNow(myPos, targetPos)
 end
 
 local function executeAttack(myPos, targetPos, distance)
-    print("1. executeAttack called")
-    
-    if S.isAttacking then 
-        print("2. BLOCKED: isAttacking is true")
-        return false 
-    end
-    print("2. isAttacking check passed")
-    
+    if S.isAttacking then return false end
     S.isAttacking = true
-    print("3. Set isAttacking = true")
     
     local canAttack, reason = canAttackNow(myPos, targetPos)
-    print("4. canAttackNow result:", canAttack, reason)
-    
     if not canAttack then 
         S.isAttacking = false
         return false 
     end
-    print("5. canAttackNow passed")
     
     local target = getCurrentTarget()
     if not target then 
-        print("6. BLOCKED: no target")
         S.isAttacking = false
         return false 
     end
-    print("6. Target:", target.Name)
-    
-    print("7. About to press Q")
     
     -- 1. Choose stable aim point (target head)
     local targetHead = getHead(target)
