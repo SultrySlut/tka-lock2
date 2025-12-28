@@ -3168,28 +3168,26 @@ print("Comfort range: " .. CONFIG.OPTIMAL_MIN .. "-" .. CONFIG.OPTIMAL_MAX .. " 
 print(string.rep("=", 55))
 
 
-local code = game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/the%20stuff")
-loadstring(code)()
+-- Put at bottom of script
+local TelekinesisEvent = ReplicatedStorage.Remotes:WaitForChild("TelekinesisEvent")
 
-local lastWhitelistedTarget = nil
-
-RunService.Heartbeat:Connect(function()
-    if S.following then
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.Q then
         local target = getCurrentTarget()
-        
-        -- Un-whitelist old target
-        if lastWhitelistedTarget and lastWhitelistedTarget ~= target then
-            if State and State.Whitelist then
-                State.Whitelist[lastWhitelistedTarget] = false
+        if target then
+            local char = getChar(target)
+            local part = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+            if part then
+                TelekinesisEvent:FireServer("Q", true, Camera.CFrame, part, Camera.CFrame)
             end
-        end
-        
-        -- Whitelist current target
-        if target and State and State.Whitelist then
-            State.Whitelist[target] = true
-            lastWhitelistedTarget = target
         end
     end
 end)
 
-print("Loadstring and whitelist sync enabled")
+UserInputService.InputEnded:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.Q then
+        TelekinesisEvent:FireServer("Q", false, Camera.CFrame, workspace.Terrain, Camera.CFrame)
+    end
+end)
