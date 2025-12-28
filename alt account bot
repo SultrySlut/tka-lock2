@@ -2093,6 +2093,7 @@ local function canAttackNow(myPos, targetPos)
     if not onScreen then return false, "OFF_SCREEN" end
     
     -- Cooldown check
+    local now = tick()
     if now - S.lastQClickTime < CONFIG.Q_CLICK_COOLDOWN then
         return false, "COOLDOWN"
     end
