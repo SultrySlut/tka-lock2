@@ -2057,13 +2057,8 @@ end
 -- COMBAT EXECUTION (Section 14)
 -- =====================================================
 
--- =====================================================
--- COMBAT EXECUTION (Section 14)
--- =====================================================
-
 local function canAttackNow(myPos, targetPos)
     -- Prevent overlapping attacks
-    if S.isAttacking then return false, "ATTACKING" end
     if not myPos or not targetPos then return false, "NO_POSITION" end
 
     -- Stamina check
