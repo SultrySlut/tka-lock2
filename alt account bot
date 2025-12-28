@@ -2748,66 +2748,7 @@ Flying: %s (stamina: %.0f)
         return
     end
     
-    -- COMBAT FLOW (main state)
-    S.currentState = "COMBAT_FLOW"
-    
-    -- Handle stuck detection
-    local stuckTime = updateStuckDetection(myPos, dt)
-    if stuckTime > CONFIG.STUCK_TIME_THRESHOLD and not S.isUnsticking then
-        startUnsticking(myPos, targetPos)
-    end
-    
-    if S.isUnsticking then
-        if tick() > S.unstickEndTime then
-            resetStuckDetection()
-        else
-            local dir = S.unstickDirection or Vector3.new(0, 0, 1)
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + dir * 50)
-            pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
-            
-            -- Still allow attacks while unsticking if target is in range
-            if targetPos and S.targetAvailable then
-                -- Keep mouse on target for grabs
-                local targetHead = getHead(getCurrentTarget())
-                local aimPoint = targetHead and targetHead.Position or targetPos
-                local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
-                if onScreen then
-                    pcall(function()
-                        VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
-                    end)
-                end
-                
-                local canAttack, reason = canAttackNow(myPos, targetPos)
-                if canAttack then
-                    executeAttack(myPos, targetPos, distance)
-                end
-            end
-            
-            updateDebugGui("STATE: UNSTICKING\nFinding clear path...\n(Still attacking if in range)")
-            return
-        end
-    end
-    
-    -- Update steering mode
-    updateSteeringMode(hDist)
-    
-    -- Ensure flight if needed
-    local flying = ensureFlight()
-    
-    -- Movement and combat based on distance
-    local combatMode = "IDLE"
-    
-    if distance > CONFIG.COMBAT_ZONE then
-        combatMode = "TRAVEL"
-    elseif distance > CONFIG.OPTIMAL_MAX then
-        combatMode = "APPROACH"
-    elseif distance < CONFIG.OPTIMAL_MIN then
-        combatMode = "TOO_CLOSE"
-    else
-        combatMode = "ATTACK"
-    end
-    
-    -- Combat Camera Lock - lerp camera toward target during active combat
+ -- Combat Camera Lock - lerp camera toward target during active combat
     local combatActive = (combatMode == "ATTACK" or combatMode == "TOO_CLOSE")
                      and (S.targetAvailable == true) 
                      and (not S.resurfaceMode) 
@@ -2829,13 +2770,27 @@ Flying: %s (stamina: %.0f)
                 end)
             end
         end
-        -- During combat lock, we skip the normal flight steering camera updates
-        -- but still do movement inputs
-        pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
         
-        -- Combat strafing for distance control
+        -- Distance control - only W or S, not both
         if combatMode == "TOO_CLOSE" then
+            clearKey(Enum.KeyCode.W)
+            clearKey(Enum.KeyCode.A)
+            clearKey(Enum.KeyCode.D)
             pulseKey(Enum.KeyCode.S, CONFIG.PULSE_S)
+        else
+            -- In sweet spot (ATTACK) - strafe side to side
+            clearKey(Enum.KeyCode.W)
+            clearKey(Enum.KeyCode.S)
+            
+            -- Alternate A/D every ~1 second
+            local strafeDir = math.floor(tick()) % 2
+            if strafeDir == 0 then
+                clearKey(Enum.KeyCode.D)
+                pulseKey(Enum.KeyCode.A, CONFIG.PULSE_A)
+            else
+                clearKey(Enum.KeyCode.A)
+                pulseKey(Enum.KeyCode.D, CONFIG.PULSE_D)
+            end
         end
     else
         -- Normal flight/ground steering (not in combat lock)
