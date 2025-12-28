@@ -3168,22 +3168,9 @@ print("Comfort range: " .. CONFIG.OPTIMAL_MIN .. "-" .. CONFIG.OPTIMAL_MAX .. " 
 print(string.rep("=", 55))
 
 
-loadstring(game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/the%20stuff"))()
+local code = game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/the%20stuff")
 
--- Override to use locked target (primary or secondary)
-originalNearestToCursor = nearestToCursor
-function nearestToCursor()
-    if S.following and getCurrentTarget() then
-        local target = getCurrentTarget()
-        local char = getChar(target)
-        if char then
-            local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
-            if part then
-                return target, part
-            end
-        end
-    end
-    return originalNearestToCursor()
-end
+-- Change local function to global function
+code = code:gsub("local function nearestToCursor", "function nearestToCursor")
 
-print("nearestToCursor override applied")
+loadstring(code)()
