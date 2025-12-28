@@ -16,7 +16,8 @@ local UserInputService = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local Camera = workspace.CurrentCamera
 local Terrain = workspace:FindFirstChildOfClass("Terrain")
-
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TelekinesisEvent = ReplicatedStorage.Remotes:WaitForChild("TelekinesisEvent")
 local player = Players.LocalPlayer
 
 -- =====================================================
