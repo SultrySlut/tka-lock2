@@ -2088,18 +2088,6 @@ local function canAttackNow(myPos, targetPos)
     local canGrab, shieldReason = canGrabTarget(myPos, targetPos)
     if not canGrab then return false, shieldReason end
     
-    -- LOS check (cached to reduce raycast spam)
-    local now = tick()
-    if now - S.lastLOSCheckTime > CONFIG.LOS_CACHE_RATE then
-        S.lastLOSCheckTime = now
-        local myRoot = getRoot(player)
-        local targetRoot = getRoot(target)
-        S.lastLOSResult = hasCompleteLineOfSight(myRoot, targetRoot)
-    end
-    if not S.lastLOSResult then
-        return false, "NO_LOS"
-    end
-    
     -- On-screen check
     local screenPos, onScreen = Camera:WorldToViewportPoint(targetPos)
     if not onScreen then return false, "OFF_SCREEN" end
@@ -2114,13 +2102,21 @@ local function canAttackNow(myPos, targetPos)
 end
 
 local function executeAttack(myPos, targetPos, distance)
+    if S.isAttacking then return false end
+    S.isAttacking = true
+    
     local canAttack, reason = canAttackNow(myPos, targetPos)
-    if not canAttack then return false end
+    if not canAttack then 
+        S.isAttacking = false
+        return false 
+    end
     
     local target = getCurrentTarget()
-    if not target then return false end
+    if not target then 
+        S.isAttacking = false
+        return false 
+    end
     
-    S.isAttacking = true
     S.lastQClickTime = tick()
     
     -- 1. Choose stable aim point (target head)
@@ -2144,11 +2140,38 @@ local function executeAttack(myPos, targetPos, distance)
     end)
     task.wait(CONFIG.Q_AIM_DELAY)
     
-    -- 4. Hold Q (begin grab)
+    -- 4. Press Q to start grab
     pressKey(Enum.KeyCode.Q)
-    task.wait(CONFIG.Q_HOLD_BEFORE_CLICK)
     
-    -- 5. Click above/below center for throw direction
+    -- 5. Wait for grab to connect (check for FollowMouse + Telekinesis)
+    local grabConnected = false
+    local startTime = tick()
+    local maxWait = 1.5  -- Max time to wait for grab
+    
+    while tick() - startTime < maxWait do
+        -- Check if alt has FollowMouse
+        local myRoot = getRoot(player)
+        local hasFollowMouse = myRoot and myRoot:FindFirstChild("FollowMouse")
+        
+        -- Check if target has Telekinesis
+        local targetRoot = getRoot(target)
+        local hasTelekinesis = targetRoot and targetRoot:FindFirstChild("Telekinesis")
+        
+        if hasFollowMouse and hasTelekinesis then
+            grabConnected = true
+            break
+        end
+        
+        task.wait(0.05)
+    end
+    
+    if not grabConnected then
+        releaseKey(Enum.KeyCode.Q)
+        S.isAttacking = false
+        return false
+    end
+    
+    -- 6. Grab connected - click to throw
     local vp = Camera.ViewportSize
     local cx, cy = vp.X / 2, vp.Y / 2
     
@@ -2162,6 +2185,7 @@ local function executeAttack(myPos, targetPos, distance)
         S.throwPhase = "PULL"
     end
     
+    -- 7. Hold Q after click, then release
     task.wait(CONFIG.Q_HOLD_AFTER_CLICK)
     releaseKey(Enum.KeyCode.Q)
     
