@@ -2057,12 +2057,16 @@ end
 -- COMBAT EXECUTION (Section 14)
 -- =====================================================
 
+-- =====================================================
+-- COMBAT EXECUTION (Section 14)
+-- =====================================================
+
 local function canAttackNow(myPos, targetPos)
-    -- Prevent overlapping attacks (race condition with task.wait in executeAttack)
+    -- Prevent overlapping attacks
     if S.isAttacking then return false, "ATTACKING" end
     if not myPos or not targetPos then return false, "NO_POSITION" end
 
-    -- Stamina check - need enough to grab
+    -- Stamina check
     local stamina = getStamina()
     if stamina and stamina < 11.5 then
         return false, "LOW_STAMINA"
@@ -2073,7 +2077,7 @@ local function canAttackNow(myPos, targetPos)
     if not isPlayerAlive(target) then return false, "TARGET_DEAD" end
     if updateInvisibilityState(target) then return false, "TARGET_INVISIBLE" end
 
-    -- Distance check - must be in combat range
+    -- Distance check
     local distance = (myPos - targetPos).Magnitude
     if distance > CONFIG.COMBAT_ZONE then
         return false, "OUT_OF_RANGE"
@@ -2102,10 +2106,14 @@ local function canAttackNow(myPos, targetPos)
 end
 
 local function executeAttack(myPos, targetPos, distance)
+    print("executeAttack called, isAttacking:", S.isAttacking)
+    
     if S.isAttacking then return false end
     S.isAttacking = true
     
     local canAttack, reason = canAttackNow(myPos, targetPos)
+    print("canAttackNow result:", canAttack, reason)
+    
     if not canAttack then 
         S.isAttacking = false
         return false 
@@ -2139,23 +2147,21 @@ local function executeAttack(myPos, targetPos, distance)
     task.wait(CONFIG.Q_AIM_DELAY)
     
     -- 4. Press Q to start grab
+    print("Pressing Q")
     pressKey(Enum.KeyCode.Q)
     
     -- 5. Wait for grab to connect (check for FollowMouse + Telekinesis)
     local grabConnected = false
     local startTime = tick()
-    local maxWait = 1.5  -- Max time to wait for grab
+    local maxWait = 1.5
     
     while tick() - startTime < maxWait do
-        -- Check if alt has FollowMouse
         local myRoot = getRoot(player)
         local hasFollowMouse = myRoot and myRoot:FindFirstChild("FollowMouse")
         
-        -- Check if target has Telekinesis
         local targetRoot = getRoot(target)
         local hasTelekinesis = targetRoot and targetRoot:FindFirstChild("Telekinesis")
         
-        -- Debug
         print("FollowMouse:", hasFollowMouse ~= nil, "Telekinesis:", hasTelekinesis ~= nil)
         
         if hasFollowMouse and hasTelekinesis then
@@ -2167,32 +2173,33 @@ local function executeAttack(myPos, targetPos, distance)
     end
     
     if not grabConnected then
+        print("Grab failed - releasing Q")
         releaseKey(Enum.KeyCode.Q)
         S.isAttacking = false
         return false
     end
     
     -- 6. Grab connected - click to throw
-    
-    -- 6. Grab connected - click to throw
+    print("Grab connected - clicking")
     local vp = Camera.ViewportSize
     local cx, cy = vp.X / 2, vp.Y / 2
     
     if distance < CONFIG.OPTIMAL_DISTANCE then
-        -- Push: click above center
         sendClickAt(cx, cy - CONFIG.CLICK_ABOVE_OFFSET)
         S.throwPhase = "PUSH"
+        print("PUSH click")
     else
-        -- Pull: click below center
         sendClickAt(cx, cy + CONFIG.CLICK_BELOW_OFFSET)
         S.throwPhase = "PULL"
+        print("PULL click")
     end
 
-     S.lastQClickTime = tick()
+    S.lastQClickTime = tick()
 
     -- 7. Hold Q after click, then release
     task.wait(CONFIG.Q_HOLD_AFTER_CLICK)
     releaseKey(Enum.KeyCode.Q)
+    print("Released Q")
     
     S.isAttacking = false
     return true
