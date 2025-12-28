@@ -3171,7 +3171,7 @@ print(string.rep("=", 55))
 loadstring(game:HttpGet("https://raw.githubusercontent.com/SultrySlut/tka-lock2/refs/heads/main/the%20stuff"))()
 
 -- Override to use locked target (primary or secondary)
-local originalNearestToCursor = nearestToCursor
+originalNearestToCursor = nearestToCursor
 function nearestToCursor()
     if S.following and getCurrentTarget() then
         local target = getCurrentTarget()
