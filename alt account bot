@@ -2150,6 +2150,93 @@ local function getCurrentTarget()
 end
 
 -- =====================================================
+-- ALT LINK SYSTEM
+-- =====================================================
+
+local HttpService = game:GetService("HttpService")
+local ALT_FILE = "altpos_" .. player.Name .. ".json"
+
+local function writeAltData()
+    local pos = getMyPosition()
+    local target = getCurrentTarget()
+    if pos then
+        pcall(function()
+            writefile(ALT_FILE, HttpService:JSONEncode({
+                name = player.Name,
+                x = pos.X,
+                y = pos.Y,
+                z = pos.Z,
+                targetName = target and target.Name or nil,
+                targetUserId = target and target.UserId or nil,
+                time = tick()
+            }))
+        end)
+    end
+end
+
+local function getAltData(altName)
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile("altpos_" .. altName .. ".json"))
+    end)
+    if ok and data and (tick() - data.time) < 2 then
+        return data
+    end
+    return nil
+end
+
+local function getOtherAltsTargets()
+    local targets = {}
+    pcall(function()
+        for _, file in ipairs(listfiles("")) do
+            local name = file:match("altpos_(.+)%.json")
+            if name and name ~= player.Name then
+                local data = getAltData(name)
+                if data and data.targetUserId then
+                    table.insert(targets, {
+                        altName = name,
+                        targetName = data.targetName,
+                        targetUserId = data.targetUserId
+                    })
+                end
+            end
+        end
+    end)
+    return targets
+end
+
+local function updateAutoSecondary(myPos)
+    if not myPos then return end
+    
+    local primaryFightable = S.targetPlayer and isPlayerAlive(S.targetPlayer) and S.targetAvailable
+    if primaryFightable then return end
+    
+    if #S.secondaryTargetUserIds > 0 then return end
+    
+    local otherTargets = getOtherAltsTargets()
+    
+    for _, info in ipairs(otherTargets) do
+        if S.targetPlayer and info.targetUserId == S.targetPlayer.UserId then
+            continue
+        end
+        
+        local targetPlayer = getPlayerByUserId(info.targetUserId)
+        if targetPlayer and isPlayerAlive(targetPlayer) then
+            local targetPos = getPlayerPosition(targetPlayer)
+            if targetPos then
+                local dist = (myPos - targetPos).Magnitude
+                if dist <= 200 then
+                    if not isSecondaryTargetById(info.targetUserId) then
+                        addSecondaryTarget(targetPlayer)
+                        print("Auto-secondary from " .. info.altName .. ": " .. info.targetName)
+                        return
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- =====================================================
 -- COMBAT EXECUTION (Section 14)
 -- =====================================================
 
@@ -2522,6 +2609,9 @@ local function processMovementFrame(dt)
     
     -- Update secondary target logic
     updateSecondaryTargetLogic(myPos)
+    
+    -- Auto-secondary from other alts
+    updateAutoSecondary(myPos)
     
     -- Refresh current target
     target = getCurrentTarget()
@@ -3249,6 +3339,18 @@ end)
 -- =====================================================
 -- STARTUP
 -- =====================================================
+
+-- Alt data write loop
+task.spawn(function()
+    while true do
+        if S.following then
+            writeAltData()
+        end
+        task.wait(0.3)
+    end
+end)
+
+print("Alt link system enabled")
 
 print(string.rep("=", 55))
 print("ALTFOLLOW SCRIPT v6.0 - FULL SPECIFICATION")
