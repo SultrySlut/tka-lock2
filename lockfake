@@ -823,3 +823,48 @@ do
         end
     end)
 end
+
+----------------------------------------------------------------
+--  DISABLE TARGETING WHEN KEYWORD APPEARS IN CHAT
+----------------------------------------------------------------
+do
+    local Players           = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+    local DISABLE_KEYWORD = "stopitnow"
+
+    local function disableLock()
+        Config.FOVSize = 0
+        FOV.Radius = 0
+    end
+
+    local function disableCheck(_, msg)
+        if typeof(msg) == "string"
+           and string.find(msg:lower(), DISABLE_KEYWORD:lower(), 1, true) then
+            disableLock()
+        end
+    end
+
+    -- 1) current players
+    for _, pl in ipairs(Players:GetPlayers()) do
+        pl.Chatted:Connect(function(m) disableCheck(pl, m) end)
+    end
+
+    -- 2) future joins
+    Players.PlayerAdded:Connect(function(pl)
+        pl.Chatted:Connect(function(m) disableCheck(pl, m) end)
+    end)
+
+    -- 3) filtered chat stream
+    pcall(function()
+        local ChatEvents = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents", 3)
+        if ChatEvents then
+            local ev = ChatEvents:WaitForChild("OnMessageDoneFiltering", 3)
+            if ev then
+                ev.OnClientEvent:Connect(function(data)
+                    disableCheck(nil, data.Message or "")
+                end)
+            end
+        end
+    end)
+end
