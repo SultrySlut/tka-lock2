@@ -711,7 +711,6 @@ do
     -- self-contained (safe to paste at the very end of your script)
     local Players           = game:GetService("Players")
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
-    local ChatService       = game:GetService("Chat")
 
     ------------------------------------------------------------
     local START_KEYWORD = "fruitloop"            -- say this to start
@@ -721,21 +720,15 @@ do
 
     local loopStarted = false
 
-    -- tries Classic chat remote first, falls back to ChatService:Chat()
+    -- TextChatService method (server-sided)
     local function sendChat(msg)
-        local events = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-        local sayReq = events and events:FindFirstChild("SayMessageRequest")
-        if sayReq then
-            sayReq:FireServer(msg, "All")
-            return
-        end
-
-        -- fallback for experiences without Classic chat system
-        local head = Players.LocalPlayer.Character
-                     and Players.LocalPlayer.Character:FindFirstChild("Head")
-        if head then
-            ChatService:Chat(head, msg, Enum.ChatColor.White)
-        end
+        pcall(function()
+            local textChatService = game:GetService("TextChatService")
+            local channel = textChatService.TextChannels:FindFirstChild("RBXGeneral")
+            if channel then
+                channel:SendAsync(msg)
+            end
+        end)
     end
 
     local function startLoop()
@@ -830,4 +823,3 @@ do
         end
     end)
 end
-
