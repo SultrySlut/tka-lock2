@@ -1,0 +1,310 @@
+--============================================================
+--  Trigger Bot - Fires when mouse is ON target
+--  • N to select nearest player to cursor as target
+--  • Instantly fires Q when mouse hovers target
+--  • Waits for grab confirmation (FollowMouse + Telekinesis)
+--  • Then clicks to throw
+--  • 75 stud max range
+--============================================================
+
+local Players            = game:GetService("Players")
+local RunService         = game:GetService("RunService")
+local UserInputService   = game:GetService("UserInputService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local Camera             = workspace.CurrentCamera
+local LocalPlayer        = Players.LocalPlayer
+
+----------------------------------------------------------------
+--  REMOTES
+----------------------------------------------------------------
+local TelekinesisEvent   = ReplicatedStorage.Remotes:WaitForChild("TelekinesisEvent")
+
+----------------------------------------------------------------
+--  CONFIG
+----------------------------------------------------------------
+local Config = {
+    MaxRange       = 75,        -- Max studs to fire
+    GrabTimeout    = 0.8,       -- Max seconds to wait for grab confirm
+    Cooldown       = 0.3,       -- Seconds between attacks
+    Enabled        = true,
+}
+
+----------------------------------------------------------------
+--  STATE
+----------------------------------------------------------------
+local State = {
+    targetPlayer   = nil,
+    lastFireTime   = 0,
+    isAttacking    = false,
+    waitingForClick = false,
+}
+
+----------------------------------------------------------------
+--  HELPER FUNCTIONS
+----------------------------------------------------------------
+local function getChar(plr)
+    if not plr then return nil end
+    local chars = workspace:FindFirstChild("Characters")
+    return (chars and chars:FindFirstChild(plr.Name)) or plr.Character
+end
+
+local function getRoot(plr)
+    local char = getChar(plr)
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
+end
+
+local function getHead(plr)
+    local char = getChar(plr)
+    return char and char:FindFirstChild("Head")
+end
+
+local function getHumanoid(plr)
+    local char = getChar(plr)
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function isPlayerAlive(plr)
+    if not plr then return false end
+    local hum = getHumanoid(plr)
+    return hum and hum.Health > 0
+end
+
+local function getDistance(plr)
+    local myRoot = getRoot(LocalPlayer)
+    local theirRoot = getRoot(plr)
+    if not myRoot or not theirRoot then return math.huge end
+    return (myRoot.Position - theirRoot.Position).Magnitude
+end
+
+local function getClosestPlayerToCursor()
+    local mousePos = UserInputService:GetMouseLocation()
+    local closest = nil
+    local closestDist = math.huge
+    
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local head = getHead(plr)
+            if head then
+                local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                if onScreen then
+                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+                    if dist < closestDist then
+                        closestDist = dist
+                        closest = plr
+                    end
+                end
+            end
+        end
+    end
+    
+    return closest
+end
+
+
+
+----------------------------------------------------------------
+--  TELEKINESIS REMOTE FIRE
+----------------------------------------------------------------
+local function fireTelekinesis(hold)
+    if not State.targetPlayer then return end
+    
+    local char = getChar(State.targetPlayer)
+    if not char then return end
+    
+    local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    if not part then return end
+    
+    local cf = Camera.CFrame
+    TelekinesisEvent:FireServer("Q", hold, cf, part, cf)
+end
+
+----------------------------------------------------------------
+--  KEY/MOUSE CONTROL
+----------------------------------------------------------------
+local function pressQ()
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Q, false, game)
+    end)
+    fireTelekinesis(true)
+end
+
+local function releaseQ()
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Q, false, game)
+    end)
+    fireTelekinesis(false)
+end
+
+----------------------------------------------------------------
+--  MOUSE ON TARGET CHECK (raycast based)
+----------------------------------------------------------------
+local function isMouseOnTarget()
+    if not State.targetPlayer then return false end
+    if not isPlayerAlive(State.targetPlayer) then return false end
+    
+    local targetChar = getChar(State.targetPlayer)
+    if not targetChar then return false end
+    
+    -- Raycast from camera through mouse position
+    local mousePos = UserInputService:GetMouseLocation()
+    local ray = Camera:ViewportPointToRay(mousePos.X, mousePos.Y)
+    
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {getChar(LocalPlayer)}
+    
+    local result = workspace:Raycast(ray.Origin, ray.Direction * 500, raycastParams)
+    
+    if result and result.Instance then
+        -- Check if hit part belongs to target
+        if result.Instance:IsDescendantOf(targetChar) then
+            return true
+        end
+    end
+    
+    return false
+end
+
+----------------------------------------------------------------
+--  GRAB CONFIRMATION CHECK
+----------------------------------------------------------------
+local function waitForGrabConfirm()
+    local myRoot = getRoot(LocalPlayer)
+    local targetRoot = getRoot(State.targetPlayer)
+    
+    local startTime = tick()
+    
+    while tick() - startTime < Config.GrabTimeout do
+        -- Check for FollowMouse on our root
+        local hasFollowMouse = myRoot and myRoot:FindFirstChild("FollowMouse")
+        
+        -- Check for Telekinesis on target root
+        local hasTelekinesis = targetRoot and targetRoot:FindFirstChild("Telekinesis")
+        
+        if hasFollowMouse and hasTelekinesis then
+            return true
+        end
+        
+        task.wait(0.03)
+    end
+    
+    return false
+end
+
+----------------------------------------------------------------
+--  ATTACK EXECUTION
+----------------------------------------------------------------
+local function executeAttack()
+    if State.isAttacking then return end
+    if not Config.Enabled then return end
+    
+    local now = tick()
+    if now - State.lastFireTime < Config.Cooldown then return end
+    
+    -- Check range
+    local dist = getDistance(State.targetPlayer)
+    if dist > Config.MaxRange then return end
+    
+    -- Check mouse on target
+    if not isMouseOnTarget() then return end
+    
+    -- Check target alive
+    if not isPlayerAlive(State.targetPlayer) then return end
+    
+    State.isAttacking = true
+    State.lastFireTime = now
+    
+    -- 1. Press Q to start grab
+    pressQ()
+    
+    -- 2. Wait for grab confirmation
+    local grabConfirmed = waitForGrabConfirm()
+    
+    if grabConfirmed then
+        -- 3. Keep Q held, wait for user to click
+        State.waitingForClick = true
+    else
+        -- Grab failed, release Q
+        releaseQ()
+        State.isAttacking = false
+    end
+end
+
+----------------------------------------------------------------
+--  MAIN LOOP
+----------------------------------------------------------------
+RunService.RenderStepped:Connect(function()
+    if Config.Enabled and State.targetPlayer then
+        executeAttack()
+    end
+end)
+
+----------------------------------------------------------------
+--  INPUT HANDLING
+----------------------------------------------------------------
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    
+    -- Mouse click while waiting = release Q after throw
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if State.waitingForClick then
+            task.spawn(function()
+                task.wait(0.05) -- Let the click register
+                releaseQ()
+                State.waitingForClick = false
+                State.isAttacking = false
+            end)
+        end
+        return
+    end
+    
+    -- N to select target
+    if input.KeyCode == Enum.KeyCode.N then
+        local target = getClosestPlayerToCursor()
+        if target then
+            if State.targetPlayer == target then
+                -- Deselect if same target
+                State.targetPlayer = nil
+                print("Target cleared")
+            else
+                State.targetPlayer = target
+                print("Target selected: " .. target.Name)
+            end
+        else
+            warn("No player found near cursor")
+        end
+    
+    -- T to toggle trigger on/off
+    elseif input.KeyCode == Enum.KeyCode.T then
+        Config.Enabled = not Config.Enabled
+        print("Trigger: " .. (Config.Enabled and "ON" or "OFF"))
+    end
+end)
+
+----------------------------------------------------------------
+--  CLEANUP ON TARGET LEAVE
+----------------------------------------------------------------
+Players.PlayerRemoving:Connect(function(plr)
+    if plr == State.targetPlayer then
+        State.targetPlayer = nil
+        print("Target left the game")
+    end
+end)
+
+----------------------------------------------------------------
+--  STARTUP
+----------------------------------------------------------------
+print("============================================")
+print("TRIGGER BOT LOADED")
+print("============================================")
+print("Controls:")
+print("  N - Select/Deselect target (nearest to cursor)")
+print("  T - Toggle trigger ON/OFF")
+print("")
+print("Max Range: " .. Config.MaxRange .. " studs")
+print("Fires Q when mouse is directly ON target")
+print("Holds Q until you click to throw")
+print("============================================")
