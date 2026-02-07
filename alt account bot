@@ -1,4 +1,3 @@
-
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
@@ -122,7 +121,7 @@ local player = Players.LocalPlayer
 
 local CONFIG = {
     -- Distance thresholds
-    OPTIMAL_DISTANCE = 64,  -- Push if closer, pull if farther
+    OPTIMAL_DISTANCE = 40,  -- Push if closer, pull if farther
     OPTIMAL_MIN = 54,
     OPTIMAL_MAX = 73,
     OPTIMAL_MID = 60,
@@ -130,7 +129,7 @@ local CONFIG = {
     SECONDARY_TARGET_RANGE = 200,
     
     -- Timing
-    Q_CLICK_COOLDOWN = 0.008,
+    Q_CLICK_COOLDOWN = 1.5,  -- Seconds between attacks
     
     -- Q Attack Timing (in seconds)
     Q_AIM_DELAY = 0,       -- Wait after moving mouse to target
@@ -149,6 +148,7 @@ local CONFIG = {
     PULSE_D = { HOLD_DURATION = 1.5, REFRESH_INTERVAL = 0.4 },
     PULSE_SPACE_RESURFACE = { HOLD_DURATION = 1.5, REFRESH_INTERVAL = 0.08 },  -- Long hold for proper resurface
     PULSE_SPACE_NORMAL = { HOLD_DURATION = 0.3, REFRESH_INTERVAL = 0.15 },
+    PULSE_Q = { HOLD_DURATION = 2.0, REFRESH_INTERVAL = 0.1 },  -- Q grab: hold 2s, refresh every 0.1s
     
     -- Idle/Wander pulse profiles (longer for smooth movement)
     PULSE_IDLE_WALK = { HOLD_DURATION = 2.0, REFRESH_INTERVAL = 0.4 },
@@ -157,6 +157,23 @@ local CONFIG = {
     -- Stamina Management
     STAMINA_MIN = 40,
     STAMINA_RECHARGE_THRESHOLD = 140,
+    
+    -- Ability Stamina Costs
+    GRAB_STAMINA_COST = 11.5,
+    SHOCKWAVE_STAMINA_COST = 1.5,
+    
+    -- Shockwave Settings
+    SHOCKWAVE_HORIZONTAL_RANGE = 10,  -- Max XZ distance to target
+    SHOCKWAVE_VERTICAL_RANGE = 1,     -- Max Y difference
+    SHOCKWAVE_COOLDOWN = 0.5,         -- Cooldown between shockwaves
+    
+    -- Self-Defense Settings
+    SELF_DEFENSE_HIT_THRESHOLD = 2,   -- Hits required to trigger self-defense
+    SELF_DEFENSE_DAMAGE = 25,         -- Only count this exact damage
+    SELF_DEFENSE_HIT_WINDOW = 5,      -- Seconds to accumulate hits
+    
+    -- Help Other Alts Settings
+    HELP_ALT_RANGE = 100,             -- Range to help other alts' targets
     
     -- Combat
     LINE_OF_SIGHT_RAYS = 20,
@@ -178,7 +195,6 @@ local CONFIG = {
     UNDERWATER_MAX_TIME = 10,
     AIR_RESURFACE_THRESHOLD = 2,
     DOLPHIN_MAX_HEIGHT = 25,  -- Max studs above water surface for dolphin arc peak
-    RESURFACE_TIMEOUT = 5,  -- If resurfacing takes longer than this, try harder
     
     -- Flight Steering (Section 18)
     ARC_DISTANCE_THRESHOLD = 140,
@@ -201,9 +217,10 @@ local CONFIG = {
     -- Stuck Detection (Section 19.3)
     STUCK_VELOCITY_THRESHOLD = 3,
     STUCK_TIME_THRESHOLD = 0.4,
-    UNSTUCK_DURATION = 3,
+    UNSTUCK_DURATION = 0.5,
     UNSTUCK_SCAN_POINTS = 40,
     UNSTUCK_SCAN_DISTANCE = 100,
+    UNSTUCK_HIT_COOLDOWN = 0.5,  -- Can't unstick if hit within this time
     
     -- Map Boundary (Section 19)
     MAP_X_MIN = -1024,
@@ -215,7 +232,7 @@ local CONFIG = {
     -- No-Chase Zones (Section 20.0)
     HOUSE_CENTER = Vector3.new(-59.50, 71.67, -431.95),
     HOUSE_RADIUS = 40,
-    HOUSE_Y_MAX = 47,
+    HOUSE_Y_MAX = 90,
     TOWER_RADIUS = 14,
     TOWER_TARGET_Y_IN = 85,
     TOWER_CENTERS = {
@@ -237,22 +254,18 @@ local CONFIG = {
     -- Taunts
     TAUNT_MIN_DELAY = 2,
     TAUNT_MAX_DELAY = 3.5,
-    TAUNT_RANGE = 100,
+    TAUNT_RANGE = 50,
     
     -- Shield (Section 10)
-    TELEK_GRAB_CHANCE = 0.20,
+    TELEK_GRAB_CHANCE = 0.80,
     
     -- Secondary target stickiness (Section 13.5)
     SECONDARY_DWELL_TIME = 1.5,
-    
-    -- Combat Camera Lock
-    COMBAT_CAM_SMOOTHNESS = 0.6,  -- Lower = snappier, higher = smoother (0-1)
-    COMBAT_CAM_OFFSET = Vector3.new(0, 0, 0),  -- Aim offset from target head
 }
 
 local TAUNTS = {
     "tried", "ez", "local", "aimless", "trash", "LOL",
-    "cope", "flopped", "newgen", "sit", "HELP", "clocked",
+    "cope", "flopped", "newgen", "sit", "HELP", "clocked","lol","TRIED","PLS", "OOP","no cause why u ate!", "IJBOL", "girl get up!", "airred","YASS U ATE", "PERIOD", "tried it", "girl just log atp",
 }
 
 -- =====================================================
@@ -294,7 +307,6 @@ local S = {
     airRemaining = CONFIG.UNDERWATER_MAX_TIME,
     isUnderwater = false,
     resurfaceMode = false,
-    emergencyResurface = false,
     dolphinStartY = nil,  -- Y position when dolphin dive started
     dolphinPhase = "RISING",  -- RISING or FALLING
     resurfaceStartTime = 0,  -- When resurface mode started (for timeout)
@@ -313,10 +325,37 @@ local S = {
     flightDisabledForStamina = false,
     lastFlightToggle = 0,
     
+    -- Fleeing target tracking (for extended ARC pursuit)
+    targetLastPos = nil,
+    targetFleeingTimer = 0,
+    targetIsFleeing = false,
+    FLEE_TIME_THRESHOLD = 1.2,  -- Seconds of fleeing before extended pursuit
+    FLEE_COMBAT_ENTRY = 75,     -- Enter combat at this range when target fleeing (max grab range)
+    effectiveCombatZone = 100,  -- Current combat entry (velocity-scaled, used by canAttackNow)
+    
+    -- Predictive pathing for fleeing targets (velocity-based with corridor)
+    targetVelocityAvg = Vector3.new(0, 0, 0),  -- Exponential moving average of velocity
+    targetPredictedDir = nil,   -- Locked direction until corridor break
+    targetPredictedPoint = nil, -- 50 studs ahead
+    targetCorridorAnchor = nil, -- Position when direction was locked
+    PREDICT_LEAD_DISTANCE = 50, -- How far ahead to aim
+    PREDICT_CORRIDOR_WIDTH = 35, -- Half-width of corridor before direction update (wider = less jitter)
+    PREDICT_VELOCITY_ALPHA = 0.10, -- EMA smoothing (lower = smoother, less responsive)
+    
     -- Combat
     lastQClickTime = 0,
     isAttacking = false,
     throwPhase = "PULL", -- PULL or PUSH
+    
+    -- Shockwave
+    lastShockwaveTime = 0,
+    
+    -- Self-defense system
+    selfDefense = {
+        attackers = {},           -- { [userId] = { hits, lastHitTime, mustKill } }
+        tempTargetUserId = nil,   -- Temporary target (attacker)
+        tempTargetReason = nil,   -- "SELF_DEFENSE" or "HELP_ALT"
+    },
     
     -- Shield (Section 10)
     telekBlockStartTime = 0,
@@ -329,6 +368,7 @@ local S = {
     isUnsticking = false,
     unstickDirection = nil,
     unstickEndTime = 0,
+    lastHitTime = 0,  -- Track when we last got hit (for unstick prevention)
     
     -- Boundary (Section 19)
     nearBoundary = false,
@@ -381,6 +421,25 @@ end
 
 local function isValidNumber(n)
     return n and n == n and math.abs(n) < 1e10
+end
+
+-- Safe camera setting: prevents streaming bug by keeping CameraSubject set
+-- and adding tiny offset to avoid perfect vertical look directions
+local function safeSetCamera(myPos, lookAtPos)
+    -- Keep CameraSubject set to prevent streaming unload
+    local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    if hum then
+        Camera.CameraSubject = hum
+    end
+    
+    -- Add tiny offset to lookAt to avoid perfect vertical (causes streaming bug)
+    local dir = lookAtPos - myPos
+    if math.abs(dir.X) < 0.01 and math.abs(dir.Z) < 0.01 then
+        -- Looking nearly straight up or down, add tiny X offset
+        lookAtPos = lookAtPos + Vector3.new(0.001, 0, 0)
+    end
+    
+    Camera.CFrame = CFrame.lookAt(myPos, lookAtPos)
 end
 
 local function clampPosition(pos)
@@ -657,6 +716,16 @@ local function updateWaterState()
     S.isUnderwater = (S.waterState == "UNDERWATER")
 end
 
+-- Check if a player's head is underwater
+local function isPlayerSubmerged(plr)
+    if not plr then return false end
+    local char = getChar(plr)
+    if not char then return false end
+    local head = char:FindFirstChild("Head")
+    if not head then return false end
+    return waterAtPoint(head.Position, char)
+end
+
 -- =====================================================
 -- SECTION 5: RIVER ZONE SYSTEM (Spec Section 5)
 -- =====================================================
@@ -730,7 +799,10 @@ local function updateAirManagement(dt)
     if S.headInWater then
         S.airRemaining = S.airRemaining - dt
     else
-        S.airRemaining = CONFIG.UNDERWATER_MAX_TIME -- instant recharge when head is out
+        -- Don't recharge air during unsticking (brief head-out doesn't count)
+        if not S.isUnsticking then
+            S.airRemaining = CONFIG.UNDERWATER_MAX_TIME -- instant recharge when head is out
+        end
     end
     
     -- Clamp air to prevent negative values
@@ -741,40 +813,20 @@ local function updateAirManagement(dt)
     local now = tick()
     
     -- Check resurface triggers
-    -- EMERGENCY: Air completely depleted - MUST resurface
-    if S.airRemaining <= 0 and S.headInWater then
-        if not S.resurfaceMode then
-            S.resurfaceStartTime = now
-        end
-        S.emergencyResurface = true
-        S.resurfaceMode = true
-    -- NORMAL: Air getting low while head in water - should resurface soon
-    elseif S.headInWater and S.airRemaining <= CONFIG.AIR_RESURFACE_THRESHOLD then
-        -- Always trigger resurface when air is low and head is underwater
-        -- Don't require riverMethodActive - we need air regardless of combat mode
+    -- RESURFACE: Air getting low while head in water - should resurface
+    if S.headInWater and S.airRemaining <= CONFIG.AIR_RESURFACE_THRESHOLD then
         if not S.resurfaceMode then
             S.resurfaceMode = true
-            S.emergencyResurface = false
             S.resurfaceStartTime = now
-        end
-    end
-    
-    -- Check for resurface timeout - if stuck trying to resurface for too long
-    if S.resurfaceMode and S.headInWater then
-        local resurfaceTime = now - S.resurfaceStartTime
-        if resurfaceTime > CONFIG.RESURFACE_TIMEOUT then
-            -- Stuck underwater - force emergency mode for more aggressive resurface
-            S.emergencyResurface = true
-            -- Reset dolphin state to try fresh approach
-            S.dolphinStartY = nil
-            S.dolphinPhase = "RISING"
         end
     end
     
     -- Clear resurface mode when head exits water (air refills above)
-    if S.resurfaceMode and not S.headInWater then
+    -- But not during unsticking
+    -- Also add timeout to prevent getting stuck in dolphin dive
+    local resurTimeout = S.resurfaceStartTime > 0 and (tick() - S.resurfaceStartTime) > 8
+    if S.resurfaceMode and (resurTimeout or (not S.headInWater and not S.isUnsticking)) then
         S.resurfaceMode = false
-        S.emergencyResurface = false
         S.resurfaceStartTime = 0
         -- Reset dolphin dive state for next time
         S.dolphinStartY = nil
@@ -796,7 +848,14 @@ local function initKeyState(keyCode)
     end
 end
 
+-- Callback for firing remote before Q press (set later when fireTelekinesisRemote is defined)
+local onBeforeQPress = nil
+
 local function pressKey(keyCode)
+    -- Fire remote BEFORE each Q press during attack
+    if keyCode == Enum.KeyCode.Q and S.isAttacking and onBeforeQPress then
+        onBeforeQPress()
+    end
     pcall(function()
         VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
     end)
@@ -1433,6 +1492,204 @@ local function isInNoChaseZone(pos)
     return isInHouseNoChase(pos) or isInTowerNoChase(pos)
 end
 
+-- Map boundary helpers (needed before updateStructureTrapped)
+local function isOutsideMapBounds(pos)
+    if not pos then return false end
+    return pos.X < CONFIG.MAP_X_MIN or pos.X > CONFIG.MAP_X_MAX or
+           pos.Z < CONFIG.MAP_Z_MIN or pos.Z > CONFIG.MAP_Z_MAX
+end
+
+local function clampToMapBounds(pos)
+    if not pos then return pos end
+    return Vector3.new(
+        math.clamp(pos.X, CONFIG.MAP_X_MIN, CONFIG.MAP_X_MAX),
+        pos.Y,
+        math.clamp(pos.Z, CONFIG.MAP_Z_MIN, CONFIG.MAP_Z_MAX)
+    )
+end
+
+-- =====================================================
+-- BORDER BARRIER DETECTION (manual ray-OBB intersection)
+-- Borders are in workspace.World.RayIgnore.Borders with CanQuery=false
+-- so normal raycasts don't hit them - need manual intersection
+-- =====================================================
+
+local function getBordersFolder()
+    local w = workspace:FindFirstChild("World")
+    if not w then return nil end
+    local ri = w:FindFirstChild("RayIgnore")
+    if not ri then return nil end
+    return ri:FindFirstChild("Borders")
+end
+
+local function gatherBorderParts()
+    local parts = {}
+    local bordersFolder = getBordersFolder()
+    if not bordersFolder then return parts end
+    
+    for _, inst in ipairs(bordersFolder:GetChildren()) do
+        -- Skip WaterBorder - it's for preventing swimming out, not a map boundary
+        if inst.Name == "WaterBorder" then
+            continue
+        end
+        
+        if inst:IsA("BasePart") then
+            table.insert(parts, inst)
+        else
+            local p = inst:FindFirstChildWhichIsA("BasePart", true)
+            if p then table.insert(parts, p) end
+        end
+    end
+    return parts
+end
+
+-- Get the WaterBorder part specifically (the one we skip in gatherBorderParts)
+local function getWaterBorderPart()
+    local bordersFolder = getBordersFolder()
+    if not bordersFolder then return nil end
+    
+    local waterBorder = bordersFolder:FindFirstChild("WaterBorder")
+    if not waterBorder then return nil end
+    
+    if waterBorder:IsA("BasePart") then
+        return waterBorder
+    else
+        return waterBorder:FindFirstChildWhichIsA("BasePart", true)
+    end
+end
+
+-- Manual ray vs OBB (oriented bounding box) intersection
+local function rayIntersectsPartOBB(origin, dirUnit, maxDist, part)
+    local cf = part.CFrame
+    local half = part.Size * 0.5
+    
+    -- Transform ray into part local space
+    local o = cf:PointToObjectSpace(origin)
+    local d = cf:VectorToObjectSpace(dirUnit)
+    
+    local tmin = 0
+    local tmax = maxDist
+    
+    local function slab(oC, dC, minB, maxB)
+        local eps = 1e-8
+        if math.abs(dC) < eps then
+            if oC < minB or oC > maxB then
+                return nil, nil
+            end
+            return tmin, tmax
+        end
+        
+        local t1 = (minB - oC) / dC
+        local t2 = (maxB - oC) / dC
+        local a = math.min(t1, t2)
+        local b = math.max(t1, t2)
+        
+        local newMin = math.max(tmin, a)
+        local newMax = math.min(tmax, b)
+        if newMin > newMax then
+            return nil, nil
+        end
+        return newMin, newMax
+    end
+    
+    local minX, maxX = -half.X, half.X
+    local minY, maxY = -half.Y, half.Y
+    local minZ, maxZ = -half.Z, half.Z
+    
+    local nm, nx = slab(o.X, d.X, minX, maxX)
+    if not nm then return nil end
+    tmin, tmax = nm, nx
+    
+    nm, nx = slab(o.Y, d.Y, minY, maxY)
+    if not nm then return nil end
+    tmin, tmax = nm, nx
+    
+    nm, nx = slab(o.Z, d.Z, minZ, maxZ)
+    if not nm then return nil end
+    tmin, tmax = nm, nx
+    
+    local tHit = tmin
+    if tHit < 0 then tHit = tmax end
+    if tHit < 0 or tHit > maxDist then return nil end
+    
+    return tHit
+end
+
+local function isBorderBetween(fromPos, toPos)
+    if not fromPos or not toPos then return false end
+    if not isValidVector(fromPos) or not isValidVector(toPos) then return false end
+    
+    local borderParts = gatherBorderParts()
+    if #borderParts == 0 then return false end
+    
+    -- Lift origin slightly like debug script does
+    local origin = fromPos + Vector3.new(0, 2, 0)
+    local target = toPos + Vector3.new(0, 2, 0)
+    
+    local dir = target - origin
+    local dist = dir.Magnitude
+    if dist < 1 then return false end
+    
+    local dirUnit = dir.Unit
+    
+    -- Check each border part for intersection
+    for _, part in ipairs(borderParts) do
+        local tHit = rayIntersectsPartOBB(origin, dirUnit, dist, part)
+        if tHit then
+            return true, part
+        end
+    end
+    
+    return false
+end
+
+-- =====================================================
+-- DIVE CLEARANCE: Check if safe to dive (no land below)
+-- Returns true if safe to dive, false if land/rocks in the way
+-- =====================================================
+
+local function canDiveHere(myPos)
+    if not myPos then return false end
+    
+    local DIVE_CHECK_DIST = 50  -- How far down to check
+    
+    -- Set up raycast params to ignore characters
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    local filterList = { workspace:FindFirstChild("Characters") }
+    raycastParams.FilterDescendantsInstances = filterList
+    
+    -- Raycast down to check for terrain/rocks
+    local origin = myPos
+    local result = workspace:Raycast(origin, Vector3.new(0, -DIVE_CHECK_DIST, 0), raycastParams)
+    
+    -- Get the WaterBorder part for manual check (since it has CanQuery=false)
+    local waterBorder = getWaterBorderPart()
+    local waterBorderDist = nil
+    
+    if waterBorder then
+        -- Manual ray-OBB intersection for WaterBorder
+        local dirUnit = Vector3.new(0, -1, 0)
+        waterBorderDist = rayIntersectsPartOBB(origin, dirUnit, DIVE_CHECK_DIST, waterBorder)
+    end
+    
+    -- If raycast hit something
+    if result then
+        local landDist = result.Distance
+        
+        -- If WaterBorder exists and is closer than the land hit, safe to dive
+        if waterBorderDist and waterBorderDist < landDist then
+            return true
+        end
+        
+        -- Land is closer than WaterBorder (or no WaterBorder), NOT safe to dive
+        return false
+    end
+    
+    -- Nothing hit by normal raycast, safe to dive
+    return true
+end
+
 -- =====================================================
 -- SECTION 20.1: STRUCTURE-TRAPPED CLASSIFIER
 -- =====================================================
@@ -1441,11 +1698,28 @@ local function updateStructureTrapped()
     local targetPos = getTargetPosition()
     local myPos = getMyPosition()
     
+    -- Check if target is outside map bounds (treat as structure)
+    if isOutsideMapBounds(targetPos) then
+        S.targetAvailable = false
+        S.unavailableReason = "OUTSIDE_MAP"
+        return true
+    end
+    
     -- Check no-chase zones
     if isInNoChaseZone(targetPos) then
         S.targetAvailable = false
         S.unavailableReason = "NO_CHASE_ZONE"
         return true
+    end
+    
+    -- Check border barrier between alt and target
+    if myPos and targetPos then
+        local borderBlocked = isBorderBetween(myPos, targetPos)
+        if borderBlocked then
+            S.targetAvailable = false
+            S.unavailableReason = "BORDER_BARRIER"
+            return true
+        end
     end
     
     -- Check availability
@@ -1635,12 +1909,8 @@ end
 -- =====================================================
 
 local function updateSteeringMode(hDist)
-    -- Hysteresis to prevent flicker
-    if S.steeringMode == "SLOPE" and hDist >= CONFIG.ARC_ENTER_DISTANCE then
-        S.steeringMode = "ARC"
-    elseif S.steeringMode == "ARC" and hDist <= CONFIG.SLOPE_ENTER_DISTANCE then
-        S.steeringMode = "SLOPE"
-    end
+    -- Always ARC for max speed - remote is spoofed so no precision aiming needed
+    S.steeringMode = "ARC"
 end
 
 local function getAngledFlightDirection(myPos, targetPos)
@@ -1761,9 +2031,7 @@ local function updateStuckDetection(myPos, dt)
 end
 
 local function scanForAlternativePath(myPos, targetPos)
-    local toTarget = safeUnit(targetPos - myPos, Vector3.new(0, 1, 0))
     local numPoints = CONFIG.UNSTUCK_SCAN_POINTS
-    local goldenRatio = (1 + math.sqrt(5)) / 2
     
     local raycastParams = RaycastParams.new()
     raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
@@ -1774,9 +2042,9 @@ local function scanForAlternativePath(myPos, targetPos)
     }
     
     local bestDirection = nil
-    local bestScore = -math.huge
+    local bestDistance = 0
     
-    -- DISK SCAN (XZ only) per Section 21.1
+    -- DISK SCAN (XZ only) - find direction with MOST open space
     for i = 0, numPoints - 1 do
         local theta = 2 * math.pi * i / numPoints
         local x = math.cos(theta)
@@ -1785,11 +2053,10 @@ local function scanForAlternativePath(myPos, targetPos)
         
         local result = workspace:Raycast(myPos, dir * CONFIG.UNSTUCK_SCAN_DISTANCE, raycastParams)
         local clearDistance = result and (result.Position - myPos).Magnitude or CONFIG.UNSTUCK_SCAN_DISTANCE
-        local dotToTarget = dir:Dot(Vector3.new(toTarget.X, 0, toTarget.Z))
-        local score = clearDistance + (dotToTarget * 15)
         
-        if clearDistance > 15 and score > bestScore then
-            bestScore = score
+        -- Simply pick the direction with most open space
+        if clearDistance > bestDistance then
+            bestDistance = clearDistance
             bestDirection = dir
         end
     end
@@ -1806,10 +2073,17 @@ local function scanForAlternativePath(myPos, targetPos)
 end
 
 local function startUnsticking(myPos, targetPos)
+    -- Don't start unsticking if we got hit recently
+    local now = tick()
+    if now - S.lastHitTime < CONFIG.UNSTUCK_HIT_COOLDOWN then
+        return false  -- Can't unstick, recently hit
+    end
+    
     S.isUnsticking = true
     S.unstickDirection = scanForAlternativePath(myPos, targetPos)
     S.unstickEndTime = tick() + CONFIG.UNSTUCK_DURATION
     stopAllMovementKeys()
+    return true  -- Started unsticking
 end
 
 local function resetStuckDetection()
@@ -1824,18 +2098,6 @@ end
 -- =====================================================
 -- MOUSE HELPERS
 -- =====================================================
-
-local function getScreenCenter()
-    local viewportSize = Camera.ViewportSize
-    return viewportSize.X / 2, viewportSize.Y / 2
-end
-
-local function moveMouseToCenter()
-    pcall(function()
-        local cx, cy = getScreenCenter()
-        VirtualInputManager:SendMouseMoveEvent(cx, cy, game)
-    end)
-end
 
 local function sendClickAt(x, y)
     pcall(function()
@@ -1915,15 +2177,9 @@ local function performDolphinDive()
         end
         
         if S.dolphinPhase == "RISING" then
-            -- Still rising: strong upward + forward
-            if S.emergencyResurface then
-                -- Emergency: Go nearly straight up!
-                flyDir = safeUnit(toTarget * 0.2 + Vector3.new(0, 0.95, 0))
-            else
-                -- Normal: Steeper angle when deeper, shallower near peak
-                local upRatio = math.max(0.5, 0.9 - (heightAboveStart / CONFIG.DOLPHIN_MAX_HEIGHT) * 0.4)
-                flyDir = safeUnit(toTarget * (1 - upRatio) + Vector3.new(0, upRatio, 0))
-            end
+            -- Still rising: steeper angle when deeper, shallower near peak
+            local upRatio = math.max(0.5, 0.9 - (heightAboveStart / CONFIG.DOLPHIN_MAX_HEIGHT) * 0.4)
+            flyDir = safeUnit(toTarget * (1 - upRatio) + Vector3.new(0, upRatio, 0))
         end
     end
     
@@ -1940,17 +2196,12 @@ local function performDolphinDive()
     end
     
     if flyDir then
-        Camera.CFrame = CFrame.lookAt(myPos, myPos + flyDir * 50)
+        safeSetCamera(myPos, myPos + flyDir * 50)
     end
     
     -- Flight is what creates the arc momentum
     ensureFlight()
     pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
-    
-    -- In emergency, also pulse Space for extra vertical lift
-    if S.emergencyResurface and S.dolphinPhase == "RISING" then
-        pulseKey(Enum.KeyCode.Space, { HOLD_DURATION = 0.3, REFRESH_INTERVAL = 0.1 })
-    end
 end
 
 -- Reset dolphin state when resurface ends
@@ -1970,20 +2221,13 @@ local function performSimpleResurface()
     -- Hold Space to swim upward
     pulseKey(Enum.KeyCode.Space, CONFIG.PULSE_SPACE_RESURFACE)
     
-    -- In emergency, aim straight up; otherwise aim toward target
-    if S.emergencyResurface then
-        -- Emergency: Look UP to maximize vertical movement
-        Camera.CFrame = CFrame.lookAt(myPos, myPos + Vector3.new(0, 50, 0))
+    -- Aim mostly up with slight forward toward target
+    local targetPos = getTargetPosition()
+    if targetPos then
+        local toTarget = safeUnit(Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z))
+        safeSetCamera(myPos, myPos + safeUnit(toTarget * 0.3 + Vector3.new(0, 0.9, 0)) * 50)
     else
-        -- Normal: Maintain some forward momentum toward target
-        local targetPos = getTargetPosition()
-        if targetPos then
-            local toTarget = safeUnit(Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z))
-            -- Aim mostly up with slight forward
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + safeUnit(toTarget * 0.3 + Vector3.new(0, 0.9, 0)) * 50)
-        else
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + Vector3.new(0, 50, 0))
-        end
+        safeSetCamera(myPos, myPos + Vector3.new(0, 50, 0))
     end
     
     pulseKey(Enum.KeyCode.W, { HOLD_DURATION = 0.5, REFRESH_INTERVAL = 0.1 })
@@ -2024,6 +2268,8 @@ end
 
 local function addSecondaryTarget(plr)
     if not plr then return false end
+    -- Can't target self
+    if plr.UserId == player.UserId then return false end
     if S.targetPlayer and plr.UserId == S.targetPlayer.UserId then return false end
     if isSecondaryTargetById(plr.UserId) then return false end
     if #S.secondaryTargetUserIds >= S.MAX_SECONDARY_TARGETS then
@@ -2084,6 +2330,17 @@ local function getEligibleSecondary(myPos)
 end
 
 local function updateSecondaryTargetLogic(myPos)
+    -- Don't engage secondary targets when idle (not following)
+    -- Self-defense will handle attackers separately
+    if not S.following then
+        if S.onSecondaryTarget then
+            stopAllMovementKeys()
+            S.onSecondaryTarget = false
+            S.activeSecondaryUserId = nil
+        end
+        return
+    end
+    
     -- Section 13.3: Only run if primary not fightable
     local primaryFightable = S.targetPlayer and isTargetAlive() and S.targetAvailable
     
@@ -2099,7 +2356,7 @@ local function updateSecondaryTargetLogic(myPos)
     end
     
     -- Section 13.3: Don't run during special modes
-    if S.resurfaceMode or S.emergencyResurface then return end
+    if S.resurfaceMode then return end
     if S.currentState == "BOUNDARY_WALK" or S.currentState == "RETURNING_TO_MAP" then return end
     
     -- Find eligible secondary
@@ -2142,10 +2399,26 @@ local function updateSecondaryTargetLogic(myPos)
     end
 end
 
+-- Forward declarations for self-defense (defined later)
+local getTempTarget
+local clearTempTarget
+local updateTempTargetLogic
+
 local function getCurrentTarget()
+    -- Priority: secondary -> temp (self-defense/help-alt) -> primary
+    
+    -- 1. Secondary target (if active)
     if S.onSecondaryTarget and S.activeSecondaryUserId then
         return getPlayerByUserId(S.activeSecondaryUserId)
     end
+    
+    -- 2. Temp target (self-defense or help-alt)
+    local tempTarget = getTempTarget()
+    if tempTarget then
+        return tempTarget
+    end
+    
+    -- 3. Primary target
     return S.targetPlayer
 end
 
@@ -2215,6 +2488,10 @@ local function updateAutoSecondary(myPos)
     local otherTargets = getOtherAltsTargets()
     
     for _, info in ipairs(otherTargets) do
+        -- Skip if targeting self
+        if info.targetUserId == player.UserId then
+            continue
+        end
         if S.targetPlayer and info.targetUserId == S.targetPlayer.UserId then
             continue
         end
@@ -2240,13 +2517,61 @@ end
 -- COMBAT EXECUTION (Section 14)
 -- =====================================================
 
+-- Check if mouse is on target via raycast (from debug script)
+local function isMouseOnTarget()
+    local target = getCurrentTarget()
+    if not target then return false end
+    if not isPlayerAlive(target) then return false end
+    
+    local targetChar = getChar(target)
+    if not targetChar then return false end
+    
+    -- Raycast from camera through mouse position
+    local mousePos = UserInputService:GetMouseLocation()
+    local ray = Camera:ViewportPointToRay(mousePos.X, mousePos.Y)
+    
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {getChar(player)}
+    
+    local result = workspace:Raycast(ray.Origin, ray.Direction * 500, raycastParams)
+    
+    if result and result.Instance then
+        -- Check if hit part belongs to target
+        if result.Instance:IsDescendantOf(targetChar) then
+            return true
+        end
+    end
+    
+    return false
+end
+
+-- Fire telekinesis remote directly (matches lock script - must be followed by Q input)
+local function fireTelekinesisRemote()
+    local target = getCurrentTarget()
+    if not target then return end
+    
+    local char = getChar(target)
+    if not char then return end
+    
+    local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    if not part then return end
+    
+    -- Fire remote with true, then Q key immediately after
+    local cf = Camera.CFrame
+    TelekinesisEvent:FireServer("Q", true, cf, part, cf)
+end
+
+-- Set callback so pressKey fires remote before Q during attacks
+onBeforeQPress = fireTelekinesisRemote
+
 local function canAttackNow(myPos, targetPos)
     -- Prevent overlapping attacks
     if not myPos or not targetPos then return false, "NO_POSITION" end
 
-    -- Stamina check
+    -- Stamina check for grab ability
     local stamina = getStamina()
-    if stamina and stamina < 11.5 then
+    if stamina and stamina < CONFIG.GRAB_STAMINA_COST then
         return false, "LOW_STAMINA"
     end
     
@@ -2254,25 +2579,39 @@ local function canAttackNow(myPos, targetPos)
     if not target then return false, "NO_TARGET" end
     if not isPlayerAlive(target) then return false, "TARGET_DEAD" end
     if updateInvisibilityState(target) then return false, "TARGET_INVISIBLE" end
-
-    -- Distance check
-    local distance = (myPos - targetPos).Magnitude
-    if distance > CONFIG.COMBAT_ZONE then
-        return false, "OUT_OF_RANGE"
+    
+    -- Can't grab underwater target from above surface
+    -- Use terrain water check for alt (water parts can have extended bounds causing false positives)
+    local altHead = getHead(player)
+    local altInTerrainWater = altHead and terrainWaterAtPoint(altHead.Position)
+    if isPlayerSubmerged(target) and not altInTerrainWater then
+        return false, "TARGET_SUBMERGED"
     end
     
-    -- Availability check
-    if not S.targetAvailable then 
-        return false, S.unavailableReason or "UNAVAILABLE"
+    -- Can't attack targets in no-chase zones (house/towers) - applies to ALL targets
+    if isInNoChaseZone(targetPos) then
+        return false, "NO_CHASE_ZONE"
+    end
+    
+    -- Can't attack targets outside map bounds
+    if isOutsideMapBounds(targetPos) then
+        return false, "OUTSIDE_MAP"
+    end
+    
+    -- Can't attack through border barrier
+    if isBorderBetween(myPos, targetPos) then
+        return false, "BORDER_BARRIER"
+    end
+
+    -- Distance check (use velocity-scaled combat zone)
+    local distance = (myPos - targetPos).Magnitude
+    if distance > S.effectiveCombatZone then
+        return false, "OUT_OF_RANGE"
     end
     
     -- Shield permission
     local canGrab, shieldReason = canGrabTarget(myPos, targetPos)
     if not canGrab then return false, shieldReason end
-    
-    -- On-screen check
-    local screenPos, onScreen = Camera:WorldToViewportPoint(targetPos)
-    if not onScreen then return false, "OFF_SCREEN" end
     
     -- Cooldown check
     local now = tick()
@@ -2287,6 +2626,12 @@ local function executeAttack(myPos, targetPos, distance)
     if S.isAttacking then return false end
     S.isAttacking = true
     
+    -- Keep moving TOWARD target during attack to close gap while grab connects
+    clearKey(Enum.KeyCode.S)
+    clearKey(Enum.KeyCode.A)
+    clearKey(Enum.KeyCode.D)
+    pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
+    
     local canAttack, reason = canAttackNow(myPos, targetPos)
     if not canAttack then 
         S.isAttacking = false
@@ -2299,84 +2644,338 @@ local function executeAttack(myPos, targetPos, distance)
         return false 
     end
     
-    -- 1. Choose stable aim point (target head)
-    local targetHead = getHead(target)
-    local aimPoint = targetHead and targetHead.Position or targetPos
-    if not aimPoint or not isValidVector(aimPoint) then
+    -- Range check - must be within 75 studs (exact max grab range)
+    if distance > 75 then
         S.isAttacking = false
         return false
     end
     
-    -- 2. Convert to screen space
-    local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
-    if not onScreen then
-        S.isAttacking = false
-        return false
-    end
+    -- 1. Q key fires remote automatically via pressKey callback
+    pulseKey(Enum.KeyCode.Q, CONFIG.PULSE_Q)
     
-    -- 3. Move mouse to aim point on screen
-    pcall(function()
-        VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
-    end)
-    task.wait(CONFIG.Q_AIM_DELAY)
-    
-    -- 4. Press Q to start grab
-    print("Pressing Q")
-    pressKey(Enum.KeyCode.Q)
-    
-    -- 5. Wait for grab to connect (check for FollowMouse + Telekinesis)
+    -- 2. Wait for grab confirmation (FollowMouse)
     local grabConnected = false
     local startTime = tick()
     local maxWait = 0.8
     
     while tick() - startTime < maxWait do
+        -- Each Q pulse fires remote automatically via pressKey
+        pulseKey(Enum.KeyCode.Q, CONFIG.PULSE_Q)
+        
         local myRoot = getRoot(player)
         local hasFollowMouse = myRoot and myRoot:FindFirstChild("FollowMouse")
         
-        local targetRoot = getRoot(target)
-        local hasTelekinesis = targetRoot and targetRoot:FindFirstChild("Telekinesis")
-        
-        print("FollowMouse:", hasFollowMouse ~= nil, "Telekinesis:", hasTelekinesis ~= nil)
-        
-        if hasFollowMouse and hasTelekinesis then
+        if hasFollowMouse then
             grabConnected = true
             break
         end
         
-        task.wait(0.05)
+        task.wait(0.03)
     end
     
     if not grabConnected then
-        print("Grab failed - releasing Q")
-        releaseKey(Enum.KeyCode.Q)
+        clearKey(Enum.KeyCode.Q)
+        S.lastQClickTime = tick()  -- Set cooldown even on miss to prevent spam
         S.isAttacking = false
         return false
     end
     
-    -- 6. Grab connected - click to throw
-    print("Grab connected - clicking")
+    -- 3. Grab connected - get current distance for push/pull decision
+    local currentMyPos = getMyPosition()
+    local currentTargetPos = getPlayerPosition(target)
+    local currentDistance = distance
+    if currentMyPos and currentTargetPos then
+        currentDistance = (currentTargetPos - currentMyPos).Magnitude
+    end
+    
+    -- 4. Click to throw (push/pull based on distance)
     local vp = Camera.ViewportSize
     local cx, cy = vp.X / 2, vp.Y / 2
     
-    if distance < CONFIG.OPTIMAL_DISTANCE then
+    if currentDistance < CONFIG.OPTIMAL_DISTANCE then
         sendClickAt(cx, cy - CONFIG.CLICK_ABOVE_OFFSET)
         S.throwPhase = "PUSH"
-        print("PUSH click")
     else
         sendClickAt(cx, cy + CONFIG.CLICK_BELOW_OFFSET)
         S.throwPhase = "PULL"
-        print("PULL click")
     end
 
     S.lastQClickTime = tick()
 
-    -- 7. Hold Q after click, then release
-    task.wait(CONFIG.Q_HOLD_AFTER_CLICK)
-    releaseKey(Enum.KeyCode.Q)
-    print("Released Q")
+    -- 5. Brief hold after click, then release
+    task.wait(0.05)
+    clearKey(Enum.KeyCode.Q)
     
     S.isAttacking = false
     return true
+end
+
+-- =====================================================
+-- SHOCKWAVE ATTACK
+-- =====================================================
+
+local function canShockwaveNow(myPos, targetPos)
+    if not myPos or not targetPos then return false, "NO_POSITION" end
+    
+    -- Stamina check for shockwave
+    local stamina = getStamina()
+    if stamina and stamina < CONFIG.SHOCKWAVE_STAMINA_COST then
+        return false, "LOW_STAMINA"
+    end
+    
+    -- Check cooldown
+    local now = tick()
+    if now - S.lastShockwaveTime < CONFIG.SHOCKWAVE_COOLDOWN then
+        return false, "COOLDOWN"
+    end
+    
+    -- Check horizontal distance (XZ plane only)
+    local horizontalDist = math.sqrt((targetPos.X - myPos.X)^2 + (targetPos.Z - myPos.Z)^2)
+    if horizontalDist > CONFIG.SHOCKWAVE_HORIZONTAL_RANGE then
+        return false, "TOO_FAR_HORIZONTAL"
+    end
+    
+    -- Check vertical distance
+    local verticalDist = math.abs(targetPos.Y - myPos.Y)
+    if verticalDist > CONFIG.SHOCKWAVE_VERTICAL_RANGE then
+        return false, "TOO_FAR_VERTICAL"
+    end
+    
+    -- Target checks
+    local target = getCurrentTarget()
+    if not target then return false, "NO_TARGET" end
+    if not isPlayerAlive(target) then return false, "TARGET_DEAD" end
+    
+    return true, "CLEAR"
+end
+
+local function executeShockwave()
+    local now = tick()
+    
+    -- Press Z for shockwave
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Z, false, game)
+    end)
+    task.wait(0.05)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Z, false, game)
+    end)
+    
+    S.lastShockwaveTime = now
+    return true
+end
+
+-- =====================================================
+-- SELF-DEFENSE SYSTEM
+-- =====================================================
+
+local function recordAttacker(attackerPlayer, damage)
+    if not attackerPlayer then return end
+    if attackerPlayer == player then return end
+    if damage ~= CONFIG.SELF_DEFENSE_DAMAGE then return end
+    
+    local userId = attackerPlayer.UserId
+    local now = tick()
+    
+    if not S.selfDefense.attackers[userId] then
+        S.selfDefense.attackers[userId] = {
+            hits = 0,
+            lastHitTime = 0,
+        }
+    end
+    
+    local data = S.selfDefense.attackers[userId]
+    
+    -- Reset hits if too old
+    if now - data.lastHitTime > CONFIG.SELF_DEFENSE_HIT_WINDOW then
+        data.hits = 0
+    end
+    
+    data.hits = data.hits + 1
+    data.lastHitTime = now
+    
+    print("Self-defense: " .. attackerPlayer.Name .. " hit us (" .. data.hits .. " hits)")
+    
+    -- Check if we should switch to this attacker
+    if data.hits >= CONFIG.SELF_DEFENSE_HIT_THRESHOLD then
+        local shouldSwitch = false
+        local reason = ""
+        
+        -- Check if idle (not following or target dead)
+        local isIdling = not S.following or S.targetWasDead or not S.targetPlayer
+        
+        if isIdling then
+            shouldSwitch = true
+            reason = "IDLE"
+        else
+            -- Check if main target is out of range
+            local myPos = getMyPosition()
+            local mainTargetPos = S.targetPlayer and getPlayerPosition(S.targetPlayer)
+            if myPos and mainTargetPos then
+                local distToMain = (myPos - mainTargetPos).Magnitude
+                if distToMain > CONFIG.COMBAT_ZONE then
+                    shouldSwitch = true
+                    reason = "MAIN_OUT_OF_RANGE"
+                end
+            else
+                shouldSwitch = true
+                reason = "NO_MAIN_POS"
+            end
+        end
+        
+        if shouldSwitch then
+            S.selfDefense.tempTargetUserId = userId
+            S.selfDefense.tempTargetReason = "SELF_DEFENSE"
+            print("Self-defense: Switching to " .. attackerPlayer.Name .. " (" .. reason .. ")")
+        end
+    end
+end
+
+clearTempTarget = function()
+    if S.selfDefense.tempTargetUserId then
+        local targetPlayer = getPlayerByUserId(S.selfDefense.tempTargetUserId)
+        print("Clearing temp target: " .. (targetPlayer and targetPlayer.Name or "unknown") .. " (reason: " .. (S.selfDefense.tempTargetReason or "none") .. ")")
+    end
+    S.selfDefense.tempTargetUserId = nil
+    S.selfDefense.tempTargetReason = nil
+end
+
+getTempTarget = function()
+    if not S.selfDefense.tempTargetUserId then return nil end
+    
+    local target = getPlayerByUserId(S.selfDefense.tempTargetUserId)
+    if not target or not isPlayerAlive(target) then
+        -- Target died - clear temp target
+        print("Temp target died - clearing")
+        clearTempTarget()
+        return nil
+    end
+    
+    return target
+end
+
+local function shouldClearTempTarget()
+    if not S.selfDefense.tempTargetUserId then return false end
+    
+    -- Clear if main target comes back in range
+    if S.targetPlayer and isPlayerAlive(S.targetPlayer) then
+        local myPos = getMyPosition()
+        local mainTargetPos = getPlayerPosition(S.targetPlayer)
+        if myPos and mainTargetPos then
+            local distToMain = (myPos - mainTargetPos).Magnitude
+            if distToMain <= CONFIG.COMBAT_ZONE then
+                print("Main target back in range - clearing temp target")
+                return true
+            end
+        end
+    end
+    
+    return false
+end
+
+updateTempTargetLogic = function()
+    -- Check if we should clear temp target
+    if shouldClearTempTarget() then
+        clearTempTarget()
+        return
+    end
+    
+    -- If not following, don't do help-alt logic
+    if not S.following then return end
+    
+    -- If already have a temp target, don't override
+    if S.selfDefense.tempTargetUserId then return end
+    
+    -- If main target is alive and in range, don't help alts
+    if S.targetPlayer and isPlayerAlive(S.targetPlayer) then
+        local myPos = getMyPosition()
+        local mainTargetPos = getPlayerPosition(S.targetPlayer)
+        if myPos and mainTargetPos then
+            local distToMain = (myPos - mainTargetPos).Magnitude
+            if distToMain <= CONFIG.COMBAT_ZONE then
+                return -- Main target available, no need to help
+            end
+        end
+    end
+    
+    -- Check if we should help another alt (from alt file system)
+    local myPos = getMyPosition()
+    if not myPos then return end
+    
+    local otherTargets = getOtherAltsTargets()
+    for _, info in ipairs(otherTargets) do
+        -- Skip if targeting self
+        if info.targetUserId == player.UserId then
+            continue
+        end
+        -- Skip if it's our own target
+        if S.targetPlayer and info.targetUserId == S.targetPlayer.UserId then
+            continue
+        end
+        
+        local targetPlayer = getPlayerByUserId(info.targetUserId)
+        if targetPlayer and isPlayerAlive(targetPlayer) then
+            local targetPos = getPlayerPosition(targetPlayer)
+            if targetPos then
+                local dist = (myPos - targetPos).Magnitude
+                if dist <= CONFIG.HELP_ALT_RANGE then
+                    S.selfDefense.tempTargetUserId = info.targetUserId
+                    S.selfDefense.tempTargetReason = "HELP_ALT"
+                    print("Helping alt " .. info.altName .. " - attacking " .. info.targetName)
+                    return
+                end
+            end
+        end
+    end
+end
+
+local function bindDamageDetection(char)
+    local hum = char:WaitForChild("Humanoid", 10)
+    if not hum then return end
+    
+    local lastHealth = hum.Health
+    local lastDamagerPlayer = nil
+    local lastDamagerTime = 0
+    
+    local function considerDamagerTag(child)
+        if not child:IsA("ObjectValue") then return end
+        if child.Name:sub(1, 7) ~= "Damaged" then return end
+        local v = child.Value
+        if typeof(v) == "Instance" and v:IsA("Player") then
+            lastDamagerPlayer = v
+            lastDamagerTime = os.clock()
+        end
+    end
+    
+    for _, c in ipairs(hum:GetChildren()) do
+        considerDamagerTag(c)
+    end
+    hum.ChildAdded:Connect(considerDamagerTag)
+    
+    hum.HealthChanged:Connect(function(newHealth)
+        if newHealth < lastHealth then
+            local dmg = lastHealth - newHealth
+            
+            -- Track any hit for unstick prevention
+            S.lastHitTime = tick()
+            
+            -- If we're currently unsticking, snap out of it
+            if S.isUnsticking then
+                S.isUnsticking = false
+                S.unstickDirection = nil
+                S.unstickEndTime = 0
+                print("Unstick cancelled - got hit!")
+            end
+            
+            task.defer(function()
+                local now = os.clock()
+                if lastDamagerPlayer and (now - lastDamagerTime) <= 1.5 then
+                    recordAttacker(lastDamagerPlayer, dmg)
+                end
+            end)
+        end
+        lastHealth = newHealth
+    end)
 end
 
 -- =====================================================
@@ -2551,25 +3150,6 @@ local function updateDebugGui(info)
 end
 
 -- =====================================================
--- COMBAT CAMERA LOCK (Lerp CFrame toward target)
--- =====================================================
-
-local function updateCombatCameraLock(myPos, targetPos, smoothness)
-    if not myPos or not targetPos then return end
-    if not isValidVector(myPos) or not isValidVector(targetPos) then return end
-    
-    local camPos = Camera.CFrame.Position
-    local targetCFrame = CFrame.lookAt(camPos, targetPos)
-    
-    -- Smooth interpolation
-    Camera.CFrame = Camera.CFrame:Lerp(targetCFrame, smoothness or CONFIG.COMBAT_CAM_SMOOTHNESS)
-end
-
-local function restoreFOV()
-    -- No-op now, camera lock doesn't change FOV
-end
-
--- =====================================================
 -- MAIN MOVEMENT LOOP (Section 22 State Machine)
 -- =====================================================
 
@@ -2613,6 +3193,9 @@ local function processMovementFrame(dt)
     -- Auto-secondary from other alts
     updateAutoSecondary(myPos)
     
+    -- Update temp target logic (self-defense / help-alt)
+    updateTempTargetLogic()
+    
     -- Refresh current target
     target = getCurrentTarget()
     targetPos = target and getPlayerPosition(target)  -- Change #4: Use getPlayerPosition
@@ -2625,6 +3208,39 @@ local function processMovementFrame(dt)
     -- Calculate distance
     local distance = targetPos and (myPos - targetPos).Magnitude or 0
     local hDist = targetPos and math.sqrt((targetPos.X - myPos.X)^2 + (targetPos.Z - myPos.Z)^2) or 0
+    
+    -- EARLY velocity tracking and effectiveCombatZone (needed before ANY attack checks)
+    if targetPos and S.targetLastPos then
+        local frameVelocity = (targetPos - S.targetLastPos) / math.max(dt, 0.001)
+        local toTarget = (targetPos - myPos).Unit
+        
+        -- Update exponential moving average of velocity (frame-rate independent)
+        local effectiveAlpha = math.min(1, S.PREDICT_VELOCITY_ALPHA * dt * 60)
+        S.targetVelocityAvg = S.targetVelocityAvg:Lerp(frameVelocity, effectiveAlpha)
+        
+        local fleeingDot = S.targetVelocityAvg.Magnitude > 1 and S.targetVelocityAvg.Unit:Dot(toTarget) or 0
+        
+        -- Fleeing if target moving away (dot > 0.3) with some speed
+        if fleeingDot > 0.3 and S.targetVelocityAvg.Magnitude > 10 then
+            S.targetFleeingTimer = S.targetFleeingTimer + dt
+        else
+            S.targetFleeingTimer = 0
+        end
+        
+        S.targetIsFleeing = S.targetFleeingTimer > S.FLEE_TIME_THRESHOLD
+    elseif not targetPos then
+        S.targetVelocityAvg = Vector3.new(0, 0, 0)
+        S.targetFleeingTimer = 0
+        S.targetIsFleeing = false
+    end
+    
+    -- Calculate effective combat zone (used by canAttackNow and state machine)
+    S.effectiveCombatZone = CONFIG.COMBAT_ZONE
+    if S.targetIsFleeing then
+        local targetSpeed = S.targetVelocityAvg.Magnitude
+        local velocityReduction = math.max(0, (targetSpeed - 20) * 0.175)
+        S.effectiveCombatZone = math.max(50, S.FLEE_COMBAT_ENTRY - velocityReduction)
+    end
     
     -- Check target death
     local targetAlive = target and isPlayerAlive(target)
@@ -2665,22 +3281,19 @@ local function processMovementFrame(dt)
         local resurTime = S.resurfaceStartTime > 0 and (tick() - S.resurfaceStartTime) or 0
         
         local debugInfo = string.format([[
-STATE: RESURFACE %s
+STATE: RESURFACE
 Mode: %s%s
 Air: %.1f / %.1f
 Head in water: %s
 Stamina: %.0f
-Resurface time: %.1fs / %.0fs
-Emergency: %s
+Resurface time: %.1fs
 ]], 
-            S.emergencyResurface and "(EMERGENCY)" or "",
             resurType,
             heightInfo,
             S.airRemaining, CONFIG.UNDERWATER_MAX_TIME,
             tostring(S.headInWater),
             stamina,
-            resurTime, CONFIG.RESURFACE_TIMEOUT,
-            tostring(S.emergencyResurface)
+            resurTime
         )
         updateDebugGui(debugInfo)
         return
@@ -2691,7 +3304,7 @@ Emergency: %s
         S.currentState = "RETURNING_TO_MAP"
         disableFlight()
         local returnDir = getBoundaryReturnDirection(myPos)
-        Camera.CFrame = CFrame.lookAt(myPos, myPos + returnDir * 50)
+        safeSetCamera(myPos, myPos + returnDir * 50)
         pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
         
         updateDebugGui("STATE: RETURNING_TO_MAP\nWalking back to safe zone...")
@@ -2704,7 +3317,7 @@ Emergency: %s
     
         -- Always walk toward center - ignore target until safe
         local returnDir = getBoundaryReturnDirection(myPos)
-        Camera.CFrame = CFrame.lookAt(myPos, myPos + returnDir * 50)
+        safeSetCamera(myPos, myPos + returnDir * 50)
         pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
     
         updateDebugGui("STATE: BOUNDARY_WALK\nNear map edge - returning to safe zone...")
@@ -2715,12 +3328,15 @@ end
     if not target or S.targetWasDead then
         S.currentState = "IDLE"
         
+        -- ALWAYS disable flight when idle - regardless of taunt state
+        disableFlight()
+        
         if S.targetWasDead and not S.hasSentTaunt then
-            -- Waiting for taunt
+            -- Waiting for taunt - stay still
+            stopAllMovementKeys()
             updateDebugGui("STATE: IDLE (waiting for taunt)")
         else
             -- Light wandering - always pulse for smooth movement
-            disableFlight()
             
             -- Occasionally pick new direction
             if not S.idleFacingDirection or math.random() > 0.98 then
@@ -2728,7 +3344,7 @@ end
                 S.idleFacingDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
             end
             
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + S.idleFacingDirection * 20)
+            safeSetCamera(myPos, myPos + S.idleFacingDirection * 20)
             
             -- Always pulse for continuous smooth walking
             pulseKey(Enum.KeyCode.W, CONFIG.PULSE_IDLE_WALK)
@@ -2739,7 +3355,9 @@ end
     end
     
     -- TARGET UNAVAILABLE (Section 12)
-    if not S.targetAvailable then
+    -- Only apply to primary target - secondary/temp targets have their own availability checks
+    local isOnAlternateTarget = S.onSecondaryTarget or S.selfDefense.tempTargetUserId
+    if not S.targetAvailable and not isOnAlternateTarget then
         S.currentState = "UNAVAILABLE_BAND"
         
         -- Guard against nil targetPos
@@ -2767,7 +3385,7 @@ end
                 local awayDir = safeUnit(myPos - targetPos)
                 -- Keep horizontal, slight up to avoid terrain
                 awayDir = safeUnit(Vector3.new(awayDir.X, 0.1, awayDir.Z))
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + awayDir * 50)
+                safeSetCamera(myPos, myPos + awayDir * 50)
                 pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
                 
                 local debugInfo = string.format([[
@@ -2787,7 +3405,7 @@ Flying outward to retreat distance...
             else
                 -- No stamina for flight - walk outward
                 local awayDir = safeUnit(Vector3.new((myPos - targetPos).X, 0, (myPos - targetPos).Z))
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + awayDir * 50)
+                safeSetCamera(myPos, myPos + awayDir * 50)
                 pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
                 
                 local debugInfo = string.format([[
@@ -2817,7 +3435,7 @@ Walking outward (no stamina for flight)...
             S.idleFacingDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
         end
         
-        Camera.CFrame = CFrame.lookAt(myPos, myPos + S.idleFacingDirection * 20)
+        safeSetCamera(myPos, myPos + S.idleFacingDirection * 20)
         
         -- Always pulse for continuous smooth walking
         pulseKey(Enum.KeyCode.W, CONFIG.PULSE_IDLE_WALK)
@@ -2837,40 +3455,72 @@ At retreat distance - idling on ground...
         return
     end
     
-    -- DIVING STATE - Flying toward river to engage underwater combat
-    -- Keep flight ON, aim at target, dive into water
+    -- DIVING STATE - Flying DOWN into river first, then approach underwater
+    -- Must be above river bounds to dive down, otherwise fly toward river first
     if S.riverMethodActive and S.waterState == "DRY" and not S.resurfaceMode then
         S.currentState = "DIVING"
         
-        -- Keep flight ON during dive approach
+        -- Keep flight ON during dive
         local isFlying = ensureFlight()
         
-        -- Aim toward target (can be above river surface)
-        if targetPos then
-            local toTarget = safeUnit(targetPos - myPos)
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + toTarget * 50)
-            
-            -- Keep mouse on target for early grabs if in range
-            local screenPos, onScreen = Camera:WorldToViewportPoint(targetPos)
-            if onScreen then
-                pcall(function()
-                    VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
-                end)
+        -- Check if we're above the river bounds
+        local inRiverBounds = myPos.X >= CONFIG.RIVER_X_MIN and myPos.X <= CONFIG.RIVER_X_MAX
+                         and myPos.Z >= CONFIG.RIVER_Z_MIN and myPos.Z <= CONFIG.RIVER_Z_MAX
+        
+        local diveY = CONFIG.RIVER_SURFACE_Y - 5
+        local divePoint
+        local mode
+        
+        if inRiverBounds then
+            -- Check if safe to dive here (no land/rocks below)
+            if canDiveHere(myPos) then
+                -- Above river and safe - dive straight down
+                divePoint = Vector3.new(myPos.X, diveY, myPos.Z)
+                mode = "DIVING DOWN"
+            else
+                -- Land below! Fly toward target instead
+                if targetPos then
+                    divePoint = Vector3.new(targetPos.X, diveY, targetPos.Z)
+                else
+                    local riverCenterX = (CONFIG.RIVER_X_MIN + CONFIG.RIVER_X_MAX) / 2
+                    local riverCenterZ = (CONFIG.RIVER_Z_MIN + CONFIG.RIVER_Z_MAX) / 2
+                    divePoint = Vector3.new(riverCenterX, diveY, riverCenterZ)
+                end
+                mode = "AVOIDING LAND"
             end
+        else
+            -- Not above river - fly toward target's position (which is in river)
+            if targetPos then
+                divePoint = Vector3.new(targetPos.X, diveY, targetPos.Z)
+            else
+                -- Fallback: fly toward river center
+                local riverCenterX = (CONFIG.RIVER_X_MIN + CONFIG.RIVER_X_MAX) / 2
+                local riverCenterZ = (CONFIG.RIVER_Z_MIN + CONFIG.RIVER_Z_MAX) / 2
+                divePoint = Vector3.new(riverCenterX, diveY, riverCenterZ)
+            end
+            mode = "FLYING TO RIVER"
         end
+        
+        -- Aim camera toward dive point
+        local toDivePoint = safeUnit(divePoint - myPos)
+        safeSetCamera(myPos, myPos + toDivePoint * 50)
         
         pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
         
         local debugInfo = string.format([[
-STATE: DIVING
-Flying toward river...
+STATE: DIVING (%s)
 Water State: %s
-Target in river: YES
-Distance: %.1f
+In River Bounds: %s
+Can Dive Here: %s
+My Y: %.1f | Dive Y: %.1f
 Flying: %s
 ]], 
+            mode,
             S.waterState,
-            distance,
+            tostring(inRiverBounds),
+            tostring(canDiveHere(myPos)),
+            myPos.Y,
+            diveY,
             tostring(isFlying)
         )
         updateDebugGui(debugInfo)
@@ -2899,20 +3549,18 @@ Flying: %s
             if canAttack then
                 executeAttack(myPos, targetPos, distance)
             end
+            
+            -- Shockwave when target very close
+            local canShockwave, shockwaveReason = canShockwaveNow(myPos, targetPos)
+            if canShockwave then
+                executeShockwave()
+            end
         end
         
         -- Dolphin movement toward target (aim at target, can be above water surface)
         if targetPos then
             local toTarget = safeUnit(targetPos - myPos)
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + toTarget * 50)
-            
-            -- Keep mouse on target for grabs
-            local screenPos, onScreen = Camera:WorldToViewportPoint(targetPos)
-            if onScreen then
-                pcall(function()
-                    VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
-                end)
-            end
+            safeSetCamera(myPos, myPos + toTarget * 50)
         end
         
         pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
@@ -2936,33 +3584,37 @@ Flying: %s (stamina: %.0f)
 -- COMBAT FLOW (main state)
     S.currentState = "COMBAT_FLOW"
     
-    -- Handle stuck detection
-    local stuckTime = updateStuckDetection(myPos, dt)
-    if stuckTime > CONFIG.STUCK_TIME_THRESHOLD and not S.isUnsticking then
-        startUnsticking(myPos, targetPos)
+    -- Handle stuck detection (but NOT if resurfacing - air takes priority)
+    if S.resurfaceMode then
+        -- Cancel any unsticking when we need to resurface
+        if S.isUnsticking then
+            resetStuckDetection()
+        end
+    else
+        local stuckTime = updateStuckDetection(myPos, dt)
+        if stuckTime > CONFIG.STUCK_TIME_THRESHOLD and not S.isUnsticking then
+            startUnsticking(myPos, targetPos)
+        end
     end
     
-    if S.isUnsticking then
+    if S.isUnsticking and not S.resurfaceMode then
         if tick() > S.unstickEndTime then
             resetStuckDetection()
         else
             local dir = S.unstickDirection or Vector3.new(0, 0, 1)
-            Camera.CFrame = CFrame.lookAt(myPos, myPos + dir * 50)
+            safeSetCamera(myPos, myPos + dir * 50)
             pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
             
             if targetPos and S.targetAvailable then
-                local targetHead = getHead(getCurrentTarget())
-                local aimPoint = targetHead and targetHead.Position or targetPos
-                local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
-                if onScreen then
-                    pcall(function()
-                        VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
-                    end)
-                end
-                
                 local canAttack, reason = canAttackNow(myPos, targetPos)
                 if canAttack then
                     executeAttack(myPos, targetPos, distance)
+                end
+                
+                -- Shockwave when target very close
+                local canShockwave, shockwaveReason = canShockwaveNow(myPos, targetPos)
+                if canShockwave then
+                    executeShockwave()
                 end
             end
             
@@ -2971,16 +3623,63 @@ Flying: %s (stamina: %.0f)
         end
     end
     
+    -- Predictive pathing with corridor system (fleeing state already calculated early)
+    if targetPos then
+        if S.targetIsFleeing and S.targetVelocityAvg.Magnitude > 10 then
+            local velocityDir = S.targetVelocityAvg.Unit
+            
+            -- Check if we need to update direction (corridor break)
+            local shouldUpdateDir = false
+            
+            if not S.targetPredictedDir or not S.targetCorridorAnchor then
+                -- No prediction yet, start one
+                shouldUpdateDir = true
+            else
+                -- Check if target left the corridor
+                local fromAnchor = targetPos - S.targetCorridorAnchor
+                -- Project onto perpendicular of predicted direction to get lateral offset
+                local lateral = fromAnchor - S.targetPredictedDir * fromAnchor:Dot(S.targetPredictedDir)
+                local lateralDist = lateral.Magnitude
+                
+                if lateralDist > S.PREDICT_CORRIDOR_WIDTH then
+                    -- Target broke out of corridor, update direction
+                    shouldUpdateDir = true
+                end
+            end
+            
+            if shouldUpdateDir then
+                S.targetPredictedDir = velocityDir
+                S.targetCorridorAnchor = targetPos
+            end
+            
+            -- Always update predicted POINT (tracks moving target along locked direction)
+            -- Clamp to map bounds so we don't aim outside the playable area
+            local rawPredicted = targetPos + S.targetPredictedDir * S.PREDICT_LEAD_DISTANCE
+            S.targetPredictedPoint = clampToMapBounds(rawPredicted)
+        else
+            -- Not fleeing or too slow, clear prediction
+            S.targetPredictedDir = nil
+            S.targetPredictedPoint = nil
+            S.targetCorridorAnchor = nil
+        end
+    else
+        -- No target position, clear prediction
+        S.targetPredictedDir = nil
+        S.targetPredictedPoint = nil
+        S.targetCorridorAnchor = nil
+    end
+    S.targetLastPos = targetPos
+    
     -- Update steering mode
     updateSteeringMode(hDist)
     
     -- Ensure flight if needed
     local flying = ensureFlight()
     
-    -- Movement and combat based on distance
+    -- Movement and combat based on distance (effectiveCombatZone calculated early)
     local combatMode = "IDLE"
     
-    if distance > CONFIG.COMBAT_ZONE then
+    if distance > S.effectiveCombatZone then
         combatMode = "TRAVEL"
     elseif distance > CONFIG.OPTIMAL_MAX then
         combatMode = "APPROACH"
@@ -2997,30 +3696,22 @@ Flying: %s (stamina: %.0f)
                      and (not S.riverMethodActive)
     
     if combatActive then
-        -- Get target head position for aiming
-        local targetHead = getHead(getCurrentTarget())
-        local aimPoint = targetHead and targetHead.Position or targetPos
-        if aimPoint then
-            aimPoint = aimPoint + CONFIG.COMBAT_CAM_OFFSET
-            updateCombatCameraLock(myPos, aimPoint, CONFIG.COMBAT_CAM_SMOOTHNESS)
-            
-            -- Keep virtual mouse locked on target every frame
-            local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
-            if onScreen then
-                pcall(function()
-                    VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
-                end)
-            end
-        end
-        
-        -- Distance control - only W or S, not both
+        -- Distance control only - remote is spoofed so no camera aiming needed
+        -- Only snap camera to target when backing up (S needs correct direction)
         if combatMode == "TOO_CLOSE" then
+            -- Face target so S moves away
+            if targetPos then
+                safeSetCamera(myPos, targetPos)
+            end
             clearKey(Enum.KeyCode.W)
             clearKey(Enum.KeyCode.A)
             clearKey(Enum.KeyCode.D)
             pulseKey(Enum.KeyCode.S, CONFIG.PULSE_S)
         else
             -- In sweet spot (ATTACK) - strafe side to side
+            if targetPos then
+                safeSetCamera(myPos, targetPos)
+            end
             clearKey(Enum.KeyCode.W)
             clearKey(Enum.KeyCode.S)
             
@@ -3038,29 +3729,66 @@ Flying: %s (stamina: %.0f)
         -- Normal flight/ground steering (not in combat lock)
         if flying then
             if S.steeringMode == "ARC" then
-                -- Arc steering with curve acceleration
-                local direction, flightType = getAngledFlightDirection(myPos, targetPos)
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + direction * 50)
+                -- Arc steering: always use diagonal keys for speed boost
+                -- Offset camera to compensate so character flies STRAIGHT toward aim point
                 
-                pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
-                
-                local myRoot = getRoot(player)
-                if myRoot then
-                    local velocity = myRoot.AssemblyLinearVelocity or myRoot.Velocity or Vector3.new(0,0,0)
-                    local curveDir, _ = getCurveDirection(myPos, targetPos, velocity)
-                    if curveDir == "RIGHT" then
-                        pulseKey(Enum.KeyCode.D, CONFIG.PULSE_D)
-                    elseif curveDir == "LEFT" then
-                        pulseKey(Enum.KeyCode.A, CONFIG.PULSE_A)
-                    else
-                        clearKey(Enum.KeyCode.A)
-                        clearKey(Enum.KeyCode.D)
+                -- Use predicted intercept point when target is fleeing, otherwise target directly
+                -- Sanity check: only use prediction if it's roughly in the same direction as target
+                local aimPos = targetPos
+                if S.targetIsFleeing and S.targetPredictedPoint and targetPos then
+                    local toTarget = (targetPos - myPos).Unit
+                    local toPredicted = (S.targetPredictedPoint - myPos).Unit
+                    local alignDot = toTarget:Dot(toPredicted)
+                    
+                    -- Only use prediction if within ~60 degrees of direct path
+                    if alignDot > 0.5 then
+                        aimPos = S.targetPredictedPoint
                     end
                 end
+                
+                local direction, flightType = getAngledFlightDirection(myPos, aimPos)
+                
+                -- Always use W+D for speed boost, offset camera LEFT to compensate
+                -- (W+D curves right, so camera points left of target = straight flight)
+                -- Apply rotation only to horizontal component, preserve Y
+                local DIAGONAL_OFFSET_ANGLE = math.rad(40) -- 40 degrees compensates for W+D diagonal
+                local horizontalDir = Vector3.new(direction.X, 0, direction.Z)
+                local rotatedHorizontal = CFrame.Angles(0, DIAGONAL_OFFSET_ANGLE, 0):VectorToWorldSpace(horizontalDir)
+                local offsetDirection = Vector3.new(rotatedHorizontal.X, direction.Y, rotatedHorizontal.Z).Unit
+                
+                -- Add tiny offset for vertical directions to avoid streaming bug
+                local lookAtPos = myPos + offsetDirection * 50
+                if math.abs(offsetDirection.X) < 0.01 and math.abs(offsetDirection.Z) < 0.01 then
+                    lookAtPos = lookAtPos + Vector3.new(0.001, 0, 0)
+                end
+                local targetCFrame = CFrame.lookAt(myPos, lookAtPos)
+                
+                -- Keep CameraSubject set for streaming
+                local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+                if hum then Camera.CameraSubject = hum end
+                
+                -- Dynamic lerp based on how far camera is from target direction
+                local currentLook = Camera.CFrame.LookVector
+                local targetLook = targetCFrame.LookVector
+                local angleDiff = math.acos(math.clamp(currentLook:Dot(targetLook), -1, 1))
+                
+                -- Scale lerp: small angle diff = gentle, large angle diff = aggressive
+                -- Frame-rate independent: scale by dt * 60
+                local MIN_ARC_LERP = 0.08
+                local MAX_ARC_LERP = 0.35
+                local baseLerp = MIN_ARC_LERP + (MAX_ARC_LERP - MIN_ARC_LERP) * math.clamp(angleDiff / math.rad(90), 0, 1)
+                local arcLerp = math.min(1, baseLerp * dt * 60)
+                
+                Camera.CFrame = Camera.CFrame:Lerp(targetCFrame, arcLerp)
+                
+                -- Always W+D for diagonal speed
+                pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
+                pulseKey(Enum.KeyCode.D, CONFIG.PULSE_D)
+                clearKey(Enum.KeyCode.A)
             else
                 -- Slope steering (precision)
                 local direction, flightType = getAngledFlightDirection(myPos, targetPos)
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + direction * 50)
+                safeSetCamera(myPos, myPos + direction * 50)
                 pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
                 clearKey(Enum.KeyCode.A)
                 clearKey(Enum.KeyCode.D)
@@ -3069,7 +3797,7 @@ Flying: %s (stamina: %.0f)
             -- Ground movement
             if targetPos then
                 local toTarget = safeUnit(Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z))
-                Camera.CFrame = CFrame.lookAt(myPos, myPos + toTarget * 50)
+                safeSetCamera(myPos, myPos + toTarget * 50)
                 pulseKey(Enum.KeyCode.W, CONFIG.PULSE_W)
             end
         end
@@ -3081,15 +3809,31 @@ Flying: %s (stamina: %.0f)
         if canAttack then
             executeAttack(myPos, targetPos, distance)
         end
+        
+        -- Shockwave when target very close (works both on ground and in flight)
+        local canShockwave, shockwaveReason = canShockwaveNow(myPos, targetPos)
+        if canShockwave then
+            executeShockwave()
+        end
     end
     
     -- Debug info
+    local fleeStatus = ""
+    if S.targetIsFleeing then
+        if S.targetPredictedPoint then
+            fleeStatus = "(FLEEING+PREDICT)"
+        else
+            fleeStatus = "(FLEEING)"
+        end
+    end
+    
     local debugInfo = string.format([[
 STATE: %s
 Target: %s %s
 Distance: %.1f (optimal: %d-%d)
-Combat: %s
-Steering: %s
+Combat: %s (entry: %.0f)
+Steering: %s %s
+Target speed: %.1f studs/s
 Flying: %s (stamina disabled: %s)
 Water: %s | Air: %.1f
 River method: %s
@@ -3099,8 +3843,10 @@ Available: %s
         (target and target.Name or "Unknown"),
         S.onSecondaryTarget and "(SECONDARY)" or "",
         distance, CONFIG.OPTIMAL_MIN, CONFIG.OPTIMAL_MAX,
-        combatMode,
+        combatMode, S.effectiveCombatZone,
         S.steeringMode,
+        fleeStatus,
+        S.targetVelocityAvg.Magnitude,
         tostring(flying), tostring(S.flightDisabledForStamina),
         S.waterState, S.airRemaining,
         tostring(S.riverMethodActive),
@@ -3134,7 +3880,6 @@ local function startFollowing()
     S.isUnderwater = false
     S.airRemaining = CONFIG.UNDERWATER_MAX_TIME
     S.resurfaceMode = false
-    S.emergencyResurface = false
     
     S.riverMethodActive = false
     S.targetTouchedWater = false
@@ -3150,6 +3895,16 @@ local function startFollowing()
     
     S.steeringMode = "SLOPE"
     S.flightDisabledForStamina = false
+    
+    -- Reset fleeing tracking
+    S.targetLastPos = nil
+    S.targetFleeingTimer = 0
+    S.targetIsFleeing = false
+    S.targetVelocityAvg = Vector3.new(0, 0, 0)
+    S.targetPredictedDir = nil
+    S.targetPredictedPoint = nil
+    S.targetCorridorAnchor = nil
+    S.effectiveCombatZone = CONFIG.COMBAT_ZONE
     
     S.lastQClickTime = 0
     S.isAttacking = false
@@ -3221,9 +3976,6 @@ local function stopFollowing()
     if hum then Camera.CameraSubject = hum end
     UserInputService.MouseBehavior = Enum.MouseBehavior.Default
     
-    -- Restore FOV (Change #3)
-    restoreFOV()
-    
     -- Clean up GUI
     removeTargetIndicator()
     if S.debugGui then S.debugGui:Destroy(); S.debugGui = nil end
@@ -3294,9 +4046,11 @@ end)
 -- EVENT CONNECTIONS
 -- =====================================================
 
-player.CharacterAdded:Connect(function()
+player.CharacterAdded:Connect(function(char)
     S.altIsDead = false
-    task.wait(1)
+    task.wait(0.2)
+    bindDamageDetection(char)
+    task.wait(0.8)
     if S.following and S.targetPlayer then
         S.flightDisabledForStamina = false
         S.isAttacking = false
@@ -3310,6 +4064,8 @@ player.CharacterRemoving:Connect(function()
     S.altIsDead = true
     releaseKey(Enum.KeyCode.Q)
     S.isAttacking = false
+    -- Clear temp target when alt dies
+    clearTempTarget()
 end)
 
 Players.PlayerAdded:Connect(function(newPlayer)
@@ -3378,35 +4134,45 @@ print("Comfort range: " .. CONFIG.OPTIMAL_MIN .. "-" .. CONFIG.OPTIMAL_MAX .. " 
 print(string.rep("=", 55))
 
 
--- Put at bottom of script
-local TelekinesisEvent = ReplicatedStorage.Remotes:WaitForChild("TelekinesisEvent")
-
-local function fireTelekinesis(hold)
-    local target = getCurrentTarget()
-    if not target then return end
-    
-    local char = getChar(target)
-    if not char then return end
-    
-    local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
-    if not part then return end
-    
+-- Backup InputBegan hook for Q presses (main combat uses fireTelekinesisRemote directly)
+local function fireTelekinesis(hold, part)
     local cf = Camera.CFrame
-    TelekinesisEvent:FireServer("Q", hold, cf, part, cf)
+    local tgt = part or workspace.Terrain
+    TelekinesisEvent:FireServer("Q", hold, cf, tgt, cf)
 end
 
 -- Listen for virtual AND real Q presses
 UserInputService.InputBegan:Connect(function(input, processed)
+    -- Skip during active attack (executeAttack handles remote directly)
+    if S.isAttacking then return end
+    
     -- Remove the processed check so virtual input works
     if input.KeyCode == Enum.KeyCode.Q and S.following then
-        fireTelekinesis(true)
+        local target = getCurrentTarget()
+        if target then
+            local char = getChar(target)
+            if char then
+                local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+                if part then
+                    fireTelekinesis(true, part)
+                end
+            end
+        end
     end
 end)
 
 UserInputService.InputEnded:Connect(function(input, processed)
     if input.KeyCode == Enum.KeyCode.Q and S.following then
-        fireTelekinesis(false)
+        fireTelekinesis(false, nil)  -- nil on release like lock script
     end
 end)
 
 print("Telekinesis targeting enabled")
+
+-- Bind damage detection for current character
+if player.Character then
+    bindDamageDetection(player.Character)
+end
+
+print("Self-defense system enabled")
+print("Help-alt system enabled (range: " .. CONFIG.HELP_ALT_RANGE .. " studs)")
