@@ -230,16 +230,32 @@ local CONFIG = {
     MAP_BOUNDARY_BUFFER = 1,
     
     -- No-Chase Zones (Section 20.0)
-    HOUSE_CENTER = Vector3.new(-59.50, 71.67, -431.95),
-    HOUSE_RADIUS = 40,
-    HOUSE_Y_MAX = 90,
-    TOWER_RADIUS = 14,
-    TOWER_TARGET_Y_IN = 85,
-    TOWER_CENTERS = {
-        Vector3.new(14.79, 48.10, -382.65),
-        Vector3.new(-1.37, 48.00, -217.07),
-        Vector3.new(-194.55, 47.65, -271.86),
-        Vector3.new(-128.60, 47.38, -417.08),
+    -- Houses (each has bottom center, width, length, bodyH, roofH, yaw)
+    HOUSES = {
+        {
+            bottom = Vector3.new(-50.335, 42.785, -413.452),
+            width = 38.42,
+            length = 88.97,
+            bodyH = 31.76,
+            roofH = 7.07,
+            yawDeg = -90.0,
+        },
+        {
+            bottom = Vector3.new(-62.410, 46.185, -450.509),
+            width = 40.00,
+            length = 47.31,
+            bodyH = 19.26,
+            roofH = 8.53,
+            yawDeg = 0.0,
+        },
+    },
+    
+    -- Tower cylinders (each has center, radius R, height H)
+    TOWERS = {
+        { center = Vector3.new(14.79, 64.43, -381.88), R = 16.62, H = 136.21 },
+        { center = Vector3.new(-2.14, 65.15, -219.38), R = 16.62, H = 135.05 },
+        { center = Vector3.new(-191.47, 67.28, -272.63), R = 17.01, H = 130.44 },
+        { center = Vector3.new(-125.52, 65.61, -417.08), R = 17.39, H = 135.05 },
     },
     
     -- Unavailable Behavior (Section 12)
@@ -264,8 +280,32 @@ local CONFIG = {
 }
 
 local TAUNTS = {
+    -- classic
     "tried", "ez", "local", "aimless", "trash", "LOL",
-    "cope", "flopped", "newgen", "sit", "HELP", "clocked","lol","TRIED","PLS", "OOP","no cause why u ate!", "IJBOL", "girl get up!", "airred","YASS U ATE", "PERIOD", "tried it", "girl just log atp",
+    "cope", "flopped", "newgen", "sit", "HELP", "clocked",
+    "lol", "TRIED", "PLS", "OOP", "airred",
+    -- sarcastic stan twitter (insulting)
+    "YASS U ATE", "slay queen", "u did that", "serving nothing",
+    "mother is mothering", "giving absolutely nothing", "the serve of all time",
+    "wow so skilled", "ur so good at this", "teach me ur ways",
+    -- direct insults
+    "girl get up", "stand up", "its embarrassing now", "pls stop",
+    "this is sad", "log off", "just quit", "find a new game",
+    "not ur game", "go play adopt me", "skill issue",
+    -- mocking
+    "aww u tried", "cute attempt", "that was adorable", "precious",
+    "bless ur heart", "u gave it ur all", "participation trophy",
+    "at least u showed up", "A for effort", "gold star for trying",
+    -- dismissive
+    "yawn", "boring", "zzzz", "next", "who", "literally who",
+    "npc behavior", "are u even playing",
+    "hello??", "is someone playing",
+    -- stay mad
+    "stay pressed", "keep crying", "tears taste good", "more tears pls",
+    "rent free", "living in ur head", "obsessed with me",
+    -- finishers
+    "gg go next", "pack it up", "wrap it up",
+    "log off queen", "the door is right there",
 }
 
 -- =====================================================
@@ -1471,17 +1511,61 @@ end
 
 local function isInHouseNoChase(pos)
     if not pos then return false end
-    local hDist = math.sqrt((pos.X - CONFIG.HOUSE_CENTER.X)^2 + (pos.Z - CONFIG.HOUSE_CENTER.Z)^2)
-    return hDist <= CONFIG.HOUSE_RADIUS and pos.Y <= CONFIG.HOUSE_Y_MAX
+    
+    for _, house in ipairs(CONFIG.HOUSES) do
+        local bottom = house.bottom
+        local width = house.width      -- X size (before rotation)
+        local length = house.length    -- Z size (before rotation)
+        local bodyH = house.bodyH
+        local roofH = house.roofH
+        local yaw = math.rad(house.yawDeg)
+        
+        -- Total height = body + roof
+        local totalH = bodyH + roofH
+        
+        -- Check Y range first (quick rejection)
+        local yMin = bottom.Y
+        local yMax = bottom.Y + totalH
+        if pos.Y < yMin or pos.Y > yMax then continue end
+        
+        -- Transform point into house's local space (rotate around bottom center)
+        local dx = pos.X - bottom.X
+        local dz = pos.Z - bottom.Z
+        
+        -- Rotate by negative yaw to get local coordinates
+        local cosYaw = math.cos(-yaw)
+        local sinYaw = math.sin(-yaw)
+        local localX = dx * cosYaw - dz * sinYaw
+        local localZ = dx * sinYaw + dz * cosYaw
+        
+        -- Check if within half-width and half-length
+        local halfW = width / 2
+        local halfL = length / 2
+        
+        if math.abs(localX) <= halfW and math.abs(localZ) <= halfL then
+            return true
+        end
+    end
+    
+    return false
 end
 
 local function isInTowerNoChase(pos)
     if not pos then return false end
-    if pos.Y < CONFIG.TOWER_TARGET_Y_IN then return false end
     
-    for _, center in ipairs(CONFIG.TOWER_CENTERS) do
+    for _, tower in ipairs(CONFIG.TOWERS) do
+        local center = tower.center
+        local R = tower.R
+        local H = tower.H
+        
+        -- Check horizontal distance
         local hDist = math.sqrt((pos.X - center.X)^2 + (pos.Z - center.Z)^2)
-        if hDist <= CONFIG.TOWER_RADIUS then
+        if hDist > R then continue end
+        
+        -- Check vertical range (center.Y is middle of cylinder)
+        local yMin = center.Y - H/2
+        local yMax = center.Y + H/2
+        if pos.Y >= yMin and pos.Y <= yMax then
             return true
         end
     end
