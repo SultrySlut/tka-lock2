@@ -42,7 +42,42 @@ local Config = {
     PlayerListOpen = false,
     ShowName       = true,
     ShowHP         = true,
-    ShowStuds      = true
+    ShowStuds      = true,
+
+    -- Proximity Force Field (invisible bubble around YOU; hex patches appear
+    -- only where a player is, colored by ESP zone, flashes on zone crossing)
+    ShowForceField    = false,
+    FF_BUBBLE_RADIUS  = 30,    -- studs: radius of the invisible personal bubble
+    FF_PATCH_SIZE     = 6,     -- mesh scale for hex patches
+    FF_MIN_TRANS      = 0.04,  -- transparency at point-blank (lower = more solid)
+    FF_FLASH_SECONDS  = 0.45,  -- duration of the crossing flash
+
+    -- Proximity Audio  (pings ONLY when the hovered player crosses a zone)
+    ProximityAudio  = false,
+    AUDIO_VOLUME    = 1.0,
+
+    -- Off-screen arrows (point at whitelisted players outside the camera view)
+    ShowArrows      = false,
+    ARROW_SIZE      = 22,     -- triangle size in pixels
+    ARROW_MARGIN    = 55,     -- pixels from screen edge
+
+    -- Update rate (Hz) for non-ESP visual systems (FF, arrows, radar).
+    -- ESP stays at full framerate because text-follow-head judder is obvious.
+    UPDATE_RATE     = 30,
+    -- Update rate (Hz) for ESP text + hover-highlight detection. 60 is
+    -- plenty smooth for head-tracking text; rate-limiting these matters on
+    -- high-refresh monitors (240Hz) where running them every frame is 4x
+    -- the work for zero visible benefit.
+    ESP_UPDATE_RATE = 60,
+
+    -- Radar panel (top-down mini map)
+    ShowRadar       = false,
+    RADAR_SIZE      = 140,    -- panel pixel size (square)
+    RADAR_POS_RIGHT = 24,     -- offset from right edge
+    RADAR_POS_TOP   = 24,     -- offset from top edge
+
+    -- Closing-speed indicator on ESP text
+    ShowClosing     = false,
 }
 
 ----------------------------------------------------------------
@@ -54,8 +89,18 @@ local State = {
     Prefs          = {},
     ESP            = {},
     HoverPlayer    = nil,
+    HoverHighlight = nil,  -- pooled Highlight instance reused across hover changes
     TelepathyTogOn = false,
-    AllTargeted    = false
+    AllTargeted    = false,
+    ForceFields    = {},   -- [plr] = { patch=Part, edge=SelectionBox, flashUntil=number }
+    PlayerZones    = {},   -- [plr] = "CLOSE" | "MED" | "FAR" | nil  (last-known tier)
+    LastPingTime   = 0,
+    PingSound      = nil,
+    Arrows         = {},   -- [plr] = Drawing Triangle
+    Radar          = nil,  -- { gui=ScreenGui, frame=Frame, dots={[plr]=Frame} }
+    LastDist       = {},   -- [plr] = last measured distance (studs)
+    LastDistTime   = {},   -- [plr] = tick() when LastDist was set
+    Closing        = {}    -- [plr] = smoothed closing speed (studs/sec; negative = approaching)
 }
 
 ----------------------------------------------------------------
@@ -487,12 +532,26 @@ local function buildESPText(plr, hp, dist)
     local parts = {}
     if Config.ShowName  then table.insert(parts, plr.DisplayName) end
     if Config.ShowHP    then table.insert(parts, "[" .. hp .. " HP]") end
-    if Config.ShowStuds then table.insert(parts, "[" .. dist .. "]") end
+    if Config.ShowStuds then
+        local s = tostring(dist)
+        -- Closing-speed arrow: down = distance dropping (approaching us),
+        -- up = fleeing. Omitted when motion is near-zero to avoid noise.
+        if Config.ShowClosing then
+            local v = State.Closing[plr]
+            if v then
+                if     v < -2 then s = s .. " \xE2\x86\x93"   -- ↓ closing
+                elseif v >  2 then s = s .. " \xE2\x86\x91"   -- ↑ fleeing
+                end
+            end
+        end
+        table.insert(parts, "[" .. s .. "]")
+    end
     if State.Whitelist[plr] == false then table.insert(parts, "[IGNORED]") end
     return table.concat(parts, " ")
 end
 
 local function updateESP()
+    local now = tick()
     for plr, txt in pairs(State.ESP) do
         local char = plr.Character
         local head = char and char:FindFirstChild("Head")
@@ -502,6 +561,23 @@ local function updateESP()
             if onScr then
                 txt.Position = Vector2.new(vp.X, vp.Y - 25)
                 local dist = studsDistance(LocalPlayer, plr)
+
+                -- EMA on raw closing speed, sampled at most ~20Hz to keep it stable
+                local lastD, lastT = State.LastDist[plr], State.LastDistTime[plr]
+                if lastD and lastT then
+                    local dt = now - lastT
+                    if dt > 0.05 then
+                        local raw  = (dist - lastD) / dt           -- negative = approaching
+                        local prev = State.Closing[plr] or 0
+                        State.Closing[plr]      = prev * 0.7 + raw * 0.3
+                        State.LastDist[plr]     = dist
+                        State.LastDistTime[plr] = now
+                    end
+                else
+                    State.LastDist[plr]     = dist
+                    State.LastDistTime[plr] = now
+                end
+
                 local hp = "?"
                 local hum = char:FindFirstChildOfClass("Humanoid")
                 if hum then hp = math.floor(hum.Health) end
@@ -584,6 +660,550 @@ local function handleChar(plr, char)
     makeESP(plr)
 end
 
+
+----------------------------------------------------------------
+--  PROXIMITY FORCE FIELD  (hex patches on a bubble around YOU;
+--  color = ESP zone, flashes when a player crosses a threshold)
+----------------------------------------------------------------
+-- Colors match colourByDist() used by the ESP text so the two features read
+-- as one system.
+local FF_COL_CLOSE = Color3.fromRGB(255,  60, 120)  -- <= DIST_CLOSE
+local FF_COL_MED   = Color3.fromRGB(180,  80, 255)  -- <= DIST_MEDIUM
+local FF_COL_FAR   = Color3.fromRGB( 90, 140, 255)  -- <= DIST_FAR
+
+local FF_PING_SOUND = "rbxassetid://136655923047274"
+
+-- Returns (zone, color, withinTierProgress) where withinTierProgress is 0..1
+-- (1 = deepest inside the tier, 0 = right at its outer edge). Used for a
+-- subtle intensity ramp inside each zone on top of the zone-based color.
+local function zoneForDistance(d)
+    if d <= Config.DIST_CLOSE then
+        local t = 1 - (d / math.max(Config.DIST_CLOSE, 1))
+        return "CLOSE", FF_COL_CLOSE, t
+    elseif d <= Config.DIST_MEDIUM then
+        local span = math.max(Config.DIST_MEDIUM - Config.DIST_CLOSE, 1)
+        local t = 1 - ((d - Config.DIST_CLOSE) / span)
+        return "MED",   FF_COL_MED,   t
+    elseif d <= Config.DIST_FAR then
+        local span = math.max(Config.DIST_FAR - Config.DIST_MEDIUM, 1)
+        local t = 1 - ((d - Config.DIST_MEDIUM) / span)
+        return "FAR",   FF_COL_FAR,   t
+    end
+    return nil
+end
+
+local function createForceField(plr)
+    if State.ForceFields[plr] then return end
+
+    local patch = Instance.new("Part")
+    patch.Name          = "FF_Patch"
+    patch.Shape         = Enum.PartType.Block
+    patch.Size          = Vector3.new(Config.FF_PATCH_SIZE, Config.FF_PATCH_SIZE, 0.2)
+    patch.Material      = Enum.Material.ForceField
+    patch.Color         = FF_COL_FAR
+    patch.Transparency  = 1                      -- starts hidden, faded in each frame
+    patch.Anchored      = true
+    patch.CanCollide    = false
+    patch.CanQuery      = false
+    patch.CanTouch      = false
+    patch.CastShadow    = false
+    patch.TopSurface    = Enum.SurfaceType.Smooth
+    patch.BottomSurface = Enum.SurfaceType.Smooth
+    patch.Parent        = workspace
+
+    -- Bright, always-visible outline so the patch reads clearly even when the
+    -- fill is partly transparent. This is the main visibility lift — no size
+    -- increase needed.
+    local edge = Instance.new("SelectionBox")
+    edge.Name                = "FF_Edge"
+    edge.Adornee             = patch
+    edge.Color3              = FF_COL_FAR
+    edge.LineThickness       = 0.06
+    edge.Transparency        = 0        -- outline fully opaque
+    edge.SurfaceTransparency = 1        -- no surface tint, outline only
+    edge.Parent              = patch
+
+    State.ForceFields[plr] = { patch = patch, edge = edge, flashUntil = 0 }
+end
+
+local function removeForceField(plr)
+    local ff = State.ForceFields[plr]
+    if ff then
+        if ff.patch then ff.patch:Destroy() end
+        State.ForceFields[plr] = nil
+    end
+    -- Always clear zone tracking, even when no patch was ever created
+    State.PlayerZones[plr] = nil
+end
+
+-- Non-destructive: just make the patch invisible. Used for range/whitelist
+-- drop-outs so we don't churn Parts for players who move in & out of range.
+-- The patch is only actually destroyed on CharacterRemoving / PlayerRemoving.
+local function hideForceField(plr)
+    local ff = State.ForceFields[plr]
+    if not ff then return end
+    if ff.patch then ff.patch.Transparency = 1 end
+    if ff.edge  then ff.edge.Transparency  = 1 end
+end
+
+local function clearAllForceFields()
+    for plr, _ in pairs(State.ForceFields) do
+        removeForceField(plr)
+    end
+end
+
+----------------------------------------------------------------
+--  PROXIMITY AUDIO  (single ping per zone crossing of hovered player)
+----------------------------------------------------------------
+local function initPingSound()
+    if State.PingSound and State.PingSound.Parent then return end
+    local s = Instance.new("Sound")
+    s.Name         = "SelZonePing"
+    s.SoundId      = FF_PING_SOUND
+    s.Volume       = Config.AUDIO_VOLUME or 1.0
+    s.PlayOnRemove = false
+    s.Parent       = game:GetService("SoundService")
+    State.PingSound = s
+end
+
+-- Fired exactly once per zone change. Pitch shifts per zone so ear can
+-- tell CLOSE/MED/FAR crossings apart without looking.
+local function playZonePing(zone)
+    initPingSound()
+    local s = State.PingSound
+    if not s then return end
+    if     zone == "CLOSE" then s.PlaybackSpeed = 1.30
+    elseif zone == "MED"   then s.PlaybackSpeed = 1.00
+    else                        s.PlaybackSpeed = 0.80  -- FAR
+    end
+    s.Volume = Config.AUDIO_VOLUME or 1.0
+    s:Stop(); s:Play()
+end
+
+----------------------------------------------------------------
+--  FORCE FIELD UPDATE (per RenderStepped)
+----------------------------------------------------------------
+local function updateForceFields()
+    -- If the FF toggle is off: tear down visuals AND wipe zone tracking so a
+    -- later re-enable doesn't instantly fire pings from stale state.
+    if not Config.ShowForceField then
+        if next(State.ForceFields) then clearAllForceFields() end
+        State.PlayerZones = {}
+        return
+    end
+
+    local myChar = LocalPlayer.Character
+    local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return end
+    local myPos   = myHRP.Position
+    local bubbleR = Config.FF_BUBBLE_RADIUS
+    local flashL  = Config.FF_FLASH_SECONDS
+    local now     = tick()
+
+    for plr, char in pairs(State.Characters) do
+        local keep = false
+        if State.Whitelist[plr] and char and char.Parent then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local awayVec = hrp.Position - myPos
+                local dist    = awayVec.Magnitude
+                local zone, col, tierT = zoneForDistance(dist)
+
+                if zone and dist > 0.1 then
+                    keep = true
+
+                    -- Zone-crossing detection
+                    local lastZone = State.PlayerZones[plr]
+                    if zone ~= lastZone then
+                        if not State.ForceFields[plr] then createForceField(plr) end
+                        local ff = State.ForceFields[plr]
+                        if ff then ff.flashUntil = now + flashL end
+
+                        -- Audio gate: only ping for the currently-hovered player.
+                        -- This keeps a lobby of 20 players from spamming pings.
+                        if Config.ProximityAudio and State.HoverPlayer == plr then
+                            playZonePing(zone)
+                        end
+
+                        State.PlayerZones[plr] = zone
+                    end
+
+                    if not State.ForceFields[plr] then createForceField(plr) end
+                    local ff = State.ForceFields[plr]
+                    if ff and ff.patch then
+                        -- Seat the hex on the bubble surface, facing outward — BUT
+                        -- pull it inward whenever the enemy is closer than the
+                        -- bubble radius, so the patch always sits between us and
+                        -- them instead of ending up behind the enemy's body.
+                        local dir       = awayVec / dist
+                        local patchDist = math.min(bubbleR, math.max(2, dist - 2))
+                        local patchPos  = myPos + dir * patchDist
+                        ff.patch.CFrame = CFrame.lookAt(patchPos, patchPos + dir)
+
+                        -- Flash envelope (1 right after cross, decays to 0 over flashL)
+                        local flashT = 0
+                        if ff.flashUntil > now then
+                            flashT = (ff.flashUntil - now) / flashL
+                        end
+
+                        -- Steady-state fill intensity now starts high so the patch is
+                        -- clearly readable even in the FAR tier. Flash adds a pop.
+                        local baseIntensity  = 0.65 + 0.30 * tierT           -- 0.65..0.95
+                        local totalIntensity = math.clamp(baseIntensity + flashT * 0.35, 0, 1)
+                        local trans = 1 - totalIntensity * (1 - Config.FF_MIN_TRANS)
+
+                        -- DYNAMIC SIZE: closer to us = bigger (capped at FF_PATCH_SIZE),
+                        -- farther out = smaller. Uses overall distance across DIST_FAR
+                        -- so there's no snap at zone borders.
+                        local sizeFactor = math.clamp(1 - (dist / math.max(Config.DIST_FAR, 1)), 0, 1)
+                        local baseSize   = Config.FF_PATCH_SIZE * (0.35 + 0.65 * sizeFactor)
+                        local sizeMul    = 1 + flashT * 0.25     -- modest flash pop
+                        -- When the patch is pulled right up to us (enemy is <~8 studs),
+                        -- shrink it so it doesn't fill the entire camera view.
+                        local nearScale  = math.clamp(patchDist / 8, 0.4, 1)
+                        local s          = baseSize * sizeMul * nearScale
+                        ff.patch.Size = Vector3.new(s, s, 0.2)
+
+                        ff.patch.Color        = col
+                        ff.patch.Transparency = math.clamp(trans, 0.02, 1)
+
+                        -- Outline stays bright regardless of fill opacity — this is what
+                        -- makes the patch "pop" without making it larger.
+                        if ff.edge then
+                            ff.edge.Color3       = col
+                            ff.edge.Transparency = 0.05
+                        end
+                    end
+                end
+            end
+        end
+
+        if not keep then
+            if State.ForceFields[plr] then hideForceField(plr) end
+            State.PlayerZones[plr] = nil
+        end
+    end
+end
+
+----------------------------------------------------------------
+--  OFF-SCREEN ARROWS  (Drawing triangles at screen edges pointing
+--  at whitelisted players who are behind the camera / offscreen)
+----------------------------------------------------------------
+local function colorForDistance(d)
+    if d <= Config.DIST_CLOSE  then return FF_COL_CLOSE end
+    if d <= Config.DIST_MEDIUM then return FF_COL_MED   end
+    if d <= Config.DIST_FAR    then return FF_COL_FAR   end
+    return nil
+end
+
+local function removeArrow(plr)
+    local a = State.Arrows[plr]
+    if a then
+        if a.fill then
+            for _, l in ipairs(a.fill)    do l:Remove() end
+        end
+        if a.outline then
+            for _, l in ipairs(a.outline) do l:Remove() end
+        end
+        State.Arrows[plr] = nil
+    end
+end
+
+-- Non-destructive: just turn the lines invisible. Saves allocate/free churn
+-- when targets pop on- and off-screen repeatedly.
+local function hideArrow(plr)
+    local a = State.Arrows[plr]
+    if not a then return end
+    if a.fill then
+        for _, l in ipairs(a.fill)    do l.Visible = false end
+    end
+    if a.outline then
+        for _, l in ipairs(a.outline) do l.Visible = false end
+    end
+end
+
+local function clearAllArrows()
+    for plr, _ in pairs(State.Arrows) do removeArrow(plr) end
+end
+
+local function updateArrows()
+    if not Config.ShowArrows then
+        if next(State.Arrows) then clearAllArrows() end
+        return
+    end
+
+    local myChar = LocalPlayer.Character
+    local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return end
+
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
+    local vpSize = cam.ViewportSize
+    local cx, cy = vpSize.X * 0.5, vpSize.Y * 0.5
+    local marginX = cx - (Config.ARROW_MARGIN or 55)
+    local marginY = cy - (Config.ARROW_MARGIN or 55)
+    if marginX <= 0 or marginY <= 0 then return end
+
+    local size = Config.ARROW_SIZE or 22
+
+    for plr, char in pairs(State.Characters) do
+        local want = false
+        if State.Whitelist[plr] and char and char.Parent then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local dist = (hrp.Position - myHRP.Position).Magnitude
+                local col  = colorForDistance(dist)
+                if col then
+                    local vp, onScreen = cam:WorldToViewportPoint(hrp.Position)
+
+                    local offscreen =
+                        (not onScreen)
+                        or vp.Z < 0
+                        or vp.X < 0 or vp.X > vpSize.X
+                        or vp.Y < 0 or vp.Y > vpSize.Y
+
+                    if offscreen then
+                        local dx, dy = vp.X - cx, vp.Y - cy
+                        if vp.Z < 0 then dx, dy = -dx, -dy end
+                        if dx == 0 and dy == 0 then dy = -1 end
+
+                        local mag = math.sqrt(dx * dx + dy * dy)
+                        local ux, uy = dx / mag, dy / mag
+
+                        local absUx, absUy = math.abs(ux), math.abs(uy)
+                        local scaleX = (absUx > 1e-4) and (marginX / absUx) or math.huge
+                        local scaleY = (absUy > 1e-4) and (marginY / absUy) or math.huge
+                        local scale  = math.min(scaleX, scaleY)
+                        local ax, ay = cx + ux * scale, cy + uy * scale
+
+                        -- Three triangle vertices. We draw the triangle with 6
+                        -- Drawing.Line objects (3 thick dark outline + 3 thinner
+                        -- bright fill tracing the same edges) instead of
+                        -- Drawing.Triangle, because filled-triangle support is
+                        -- inconsistent across executors. Lines always render.
+                        local px, py = -uy, ux                                     -- perpendicular
+                        local baseCX = ax - ux * size * 1.6
+                        local baseCY = ay - uy * size * 1.6
+                        local halfW  = size * 0.75
+                        local P1 = Vector2.new(ax, ay)                              -- tip
+                        local P2 = Vector2.new(baseCX + px * halfW, baseCY + py * halfW)
+                        local P3 = Vector2.new(baseCX - px * halfW, baseCY - py * halfW)
+
+                        local a = State.Arrows[plr]
+                        if not a then
+                            local function newLine(thickness, color)
+                                local l = Drawing.new("Line")
+                                l.Thickness    = thickness
+                                l.Color        = color
+                                l.Transparency = 1
+                                l.Visible      = false
+                                return l
+                            end
+                            local dark = Color3.fromRGB(8, 10, 16)
+                            a = {
+                                outline = { newLine(6, dark), newLine(6, dark), newLine(6, dark) },
+                                fill    = { newLine(3, col),  newLine(3, col),  newLine(3, col)  },
+                            }
+                            State.Arrows[plr] = a
+                        end
+
+                        -- Edges: P1-P2, P2-P3, P3-P1
+                        a.outline[1].From, a.outline[1].To = P1, P2
+                        a.outline[2].From, a.outline[2].To = P2, P3
+                        a.outline[3].From, a.outline[3].To = P3, P1
+                        a.fill[1].From,    a.fill[1].To    = P1, P2
+                        a.fill[2].From,    a.fill[2].To    = P2, P3
+                        a.fill[3].From,    a.fill[3].To    = P3, P1
+                        for i = 1, 3 do
+                            a.outline[i].Visible = true
+                            a.fill[i].Color      = col
+                            a.fill[i].Visible    = true
+                        end
+                        want = true
+                    end
+                end
+            end
+        end
+
+        if not want and State.Arrows[plr] then
+            hideArrow(plr)
+        end
+    end
+end
+
+----------------------------------------------------------------
+--  RADAR PANEL  (top-down mini map, parented inside SelGUI so it
+--  renders in lockstep with the rest of the UI)
+----------------------------------------------------------------
+local function createRadar()
+    if State.Radar then return end
+
+    -- Attach to the main SelGUI so we don't create a second ScreenGui that
+    -- might end up in a different render layer than the rest of the UI.
+    local sg = CoreGui:FindFirstChild("SelGUI")
+    if not sg then return end     -- main GUI not built yet; try again next frame
+
+    local size = Config.RADAR_SIZE
+    local frame = Instance.new("Frame")
+    frame.Name               = "RadarPanel"
+    frame.Size               = UDim2.fromOffset(size, size)
+    frame.Position           = UDim2.new(1, -size - Config.RADAR_POS_RIGHT, 0, Config.RADAR_POS_TOP)
+    frame.BackgroundColor3   = Color3.fromRGB(10, 14, 22)
+    frame.BackgroundTransparency = 0.25
+    frame.BorderSizePixel    = 0
+    frame.ZIndex             = 50
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(1, 0)
+
+    local stroke = Instance.new("UIStroke", frame)
+    stroke.Color        = THEME.panelBorder
+    stroke.Thickness    = 1.2
+    stroke.Transparency = 0.4
+
+    -- Subtle range rings at DIST_CLOSE and DIST_MEDIUM (FAR = outer edge).
+    local function makeRing(ratio, alpha)
+        local ring = Instance.new("Frame", frame)
+        ring.AnchorPoint            = Vector2.new(0.5, 0.5)
+        ring.Position               = UDim2.fromScale(0.5, 0.5)
+        ring.Size                   = UDim2.fromScale(ratio, ratio)
+        ring.BackgroundTransparency = 1
+        ring.BorderSizePixel        = 0
+        ring.ZIndex                 = 51
+        Instance.new("UICorner", ring).CornerRadius = UDim.new(1, 0)
+        local rs = Instance.new("UIStroke", ring)
+        rs.Color        = THEME.textSecondary
+        rs.Thickness    = 1
+        rs.Transparency = alpha
+    end
+    makeRing(Config.DIST_CLOSE  / Config.DIST_FAR, 0.55)
+    makeRing(Config.DIST_MEDIUM / Config.DIST_FAR, 0.70)
+
+    -- Forward line from center to top (stays fixed since radar rotates with camera)
+    local fwd = Instance.new("Frame", frame)
+    fwd.AnchorPoint      = Vector2.new(0.5, 1)
+    fwd.Position         = UDim2.new(0.5, 0, 0.5, 0)
+    fwd.Size             = UDim2.fromOffset(2, size * 0.18)
+    fwd.BackgroundColor3 = Color3.fromRGB(240, 245, 255)
+    fwd.BackgroundTransparency = 0.3
+    fwd.BorderSizePixel  = 0
+    fwd.ZIndex           = 52
+
+    -- Center dot (you)
+    local me = Instance.new("Frame", frame)
+    me.AnchorPoint      = Vector2.new(0.5, 0.5)
+    me.Position         = UDim2.fromScale(0.5, 0.5)
+    me.Size             = UDim2.fromOffset(6, 6)
+    me.BackgroundColor3 = Color3.fromRGB(240, 245, 255)
+    me.BorderSizePixel  = 0
+    me.ZIndex           = 53
+    Instance.new("UICorner", me).CornerRadius = UDim.new(1, 0)
+
+    frame.Parent = sg
+    State.Radar  = { frame = frame, dots = {} }
+end
+
+local function destroyRadar()
+    if not State.Radar then return end
+    if State.Radar.frame then State.Radar.frame:Destroy() end
+    State.Radar = nil
+end
+
+local function removeRadarDot(plr)
+    local r = State.Radar
+    if not r then return end
+    local d = r.dots[plr]
+    if d then d:Destroy(); r.dots[plr] = nil end
+end
+
+local function hideRadarDot(plr)
+    local r = State.Radar
+    if not r then return end
+    local d = r.dots[plr]
+    if d then d.Visible = false end
+end
+
+local function updateRadar()
+    if not Config.ShowRadar then
+        if State.Radar then destroyRadar() end
+        return
+    end
+
+    -- Always read the current camera live; captured Camera at script top can go
+    -- stale across respawns.
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
+    -- Rebuild the radar any time the frame got destroyed/unparented externally.
+    if State.Radar and (not State.Radar.frame or not State.Radar.frame.Parent) then
+        destroyRadar()
+    end
+    if not State.Radar then
+        createRadar()
+        if not State.Radar then return end     -- SelGUI still not ready
+    end
+    local r = State.Radar
+
+    local myChar = LocalPlayer.Character
+    local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then
+        for plr, _ in pairs(r.dots) do removeRadarDot(plr) end
+        return
+    end
+
+    local camCF   = cam.CFrame
+    local rightV  = camCF.RightVector
+    local lookV   = camCF.LookVector
+    local myPos   = myHRP.Position
+    local size    = Config.RADAR_SIZE
+    local radius  = (size * 0.5) - 6
+    local range   = math.max(Config.DIST_FAR, 1)
+
+    for plr, char in pairs(State.Characters) do
+        local keep = false
+        if plr ~= LocalPlayer and State.Whitelist[plr]
+           and char and char.Parent then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local delta = hrp.Position - myPos
+                local dist  = delta.Magnitude
+                if dist <= range then
+                    local col = colorForDistance(dist)
+                    if col then
+                        -- Dot-product math: avoids VectorToObjectSpace quirks.
+                        -- rx = right component in camera's view (+ right / - left)
+                        -- ry = forward component          (+ in front / - behind)
+                        local rx = delta:Dot(rightV)
+                        local ry = delta:Dot(lookV)
+                        local px = (rx / range) * radius
+                        local py = (ry / range) * radius
+
+                        local dot = r.dots[plr]
+                        if not dot or not dot.Parent then
+                            dot = Instance.new("Frame")
+                            dot.Name        = "Dot"
+                            dot.AnchorPoint = Vector2.new(0.5, 0.5)
+                            dot.Size        = UDim2.fromOffset(8, 8)
+                            dot.BorderSizePixel = 0
+                            dot.ZIndex      = 55
+                            Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+                            dot.Parent = r.frame
+                            r.dots[plr] = dot
+                        end
+                        -- UI Y grows downward, so negate py (forward = up on radar).
+                        dot.Position         = UDim2.new(0.5, px, 0.5, -py)
+                        dot.BackgroundColor3 = col
+                        dot.Visible          = true
+                        keep = true
+                    end
+                end
+            end
+        end
+        if not keep and r.dots[plr] then
+            hideRadarDot(plr)
+        end
+    end
+end
+
 local function trackPlayers()
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then
@@ -591,7 +1211,15 @@ local function trackPlayers()
             makeESP(p)
             if p.Character then handleChar(p, p.Character) end
             p.CharacterAdded:Connect(function(c) handleChar(p, c) end)
-            p.CharacterRemoving:Connect(function() State.Characters[p] = nil end)
+            p.CharacterRemoving:Connect(function()
+                State.Characters[p] = nil
+                removeForceField(p)
+                removeArrow(p)
+                removeRadarDot(p)
+                State.LastDist[p] = nil
+                State.LastDistTime[p] = nil
+                State.Closing[p] = nil
+            end)
         end
     end
 
@@ -608,10 +1236,17 @@ local function trackPlayers()
         State.Characters[p] = nil
         State.Prefs[p.UserId] = State.Whitelist[p]
         removeESP(p)
+        removeForceField(p)
+        removeArrow(p)
+        removeRadarDot(p)
+        State.LastDist[p] = nil
+        State.LastDistTime[p] = nil
+        State.Closing[p] = nil
         updatePlayerListUI()
         savePrefs()
     end)
 end
+
 
 ----------------------------------------------------------------
 --  TARGET SELECTION
@@ -714,7 +1349,7 @@ local function buildGUI()
 
     -- MAIN PANEL -----------------------------------------------
     local mainGlow, main = createGlassPanel(sg,
-        UDim2.fromOffset(260, 490),
+        UDim2.fromOffset(260, 660),
         UDim2.fromOffset(14, 280)
     )
     mainGlow.Name = "Main"
@@ -742,15 +1377,53 @@ local function buildGUI()
         "Highlight", function() return Config.ShowHighlight end, function(v)
             Config.ShowHighlight = v
             if not v then
+                if State.HoverHighlight then
+                    State.HoverHighlight:Destroy()
+                    State.HoverHighlight = nil
+                end
+                -- Clean up any legacy HoverHL instances that predate pooling
                 for _, h in ipairs(CoreGui:GetChildren()) do
                     if h:IsA("Highlight") and h.Name == "HoverHL" then h:Destroy() end
                 end
+                State.HoverPlayer = nil  -- prevent stale hover from firing proximity pings
             end
         end)
     curY = curY + spacing
 
     createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
         "Wall-Bang", function() return Config.WallBang end, function(v) Config.WallBang = v end)
+    curY = curY + spacing
+
+    createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+        "Force Field", function() return Config.ShowForceField end, function(v)
+            Config.ShowForceField = v
+            if not v then clearAllForceFields() end
+        end)
+    curY = curY + spacing
+
+    createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+        "Proximity Audio", function() return Config.ProximityAudio end, function(v)
+            Config.ProximityAudio = v
+            if v then
+                initPingSound()
+            elseif State.PingSound then
+                State.PingSound:Stop()
+            end
+        end)
+    curY = curY + spacing
+
+    createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+        "Off-Screen Arrows", function() return Config.ShowArrows end, function(v)
+            Config.ShowArrows = v
+            if not v then clearAllArrows() end
+        end)
+    curY = curY + spacing
+
+    createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+        "Radar", function() return Config.ShowRadar end, function(v)
+            Config.ShowRadar = v
+            if not v then destroyRadar() end
+        end)
     curY = curY + spacing
 
     -- ── ESP ELEMENTS section ──
@@ -767,6 +1440,10 @@ local function buildGUI()
 
     createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
         "Studs", function() return Config.ShowStuds end, function(v) Config.ShowStuds = v end)
+    curY = curY + spacing
+
+    createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+        "Closing Speed", function() return Config.ShowClosing end, function(v) Config.ShowClosing = v end)
     curY = curY + spacing
 
     -- ── SETTINGS section ──
@@ -1060,22 +1737,60 @@ local function init()
     trackPlayers()
     UserInputService.InputBegan:Connect(onInputBegan)
     UserInputService.InputEnded:Connect(onInputEnded)
+    local lastUpdate = { esp = 0, hover = 0, ff = 0, arrows = 0, radar = 0 }
     RunService.RenderStepped:Connect(function()
+        -- Cursor follows every frame (feels bad if it doesn't).
         FOV.Position = UserInputService:GetMouseLocation()
-        updateESP()
-        if Config.ShowHighlight and not State.TelepathyTogOn then
+
+        local now      = tick()
+        local interval = 1 / math.max(Config.UPDATE_RATE or 30, 1)
+        local espInt   = 1 / math.max(Config.ESP_UPDATE_RATE or 60, 1)
+
+        -- ESP at its own (higher) rate so head-tracking text stays smooth.
+        if now - lastUpdate.esp >= espInt then
+            lastUpdate.esp = now
+            pcall(updateESP)
+        end
+
+        -- Non-ESP systems: slower cadence, half the CPU/GPU load.
+        if now - lastUpdate.ff >= interval then
+            lastUpdate.ff = now
+            pcall(updateForceFields)
+        end
+        if now - lastUpdate.arrows >= interval then
+            lastUpdate.arrows = now
+            pcall(updateArrows)
+        end
+        if now - lastUpdate.radar >= interval then
+            lastUpdate.radar = now
+            pcall(updateRadar)
+        end
+
+        -- Hover highlight: gated at ESP_UPDATE_RATE too. nearestToCursor does
+        -- a raycast per in-FOV whitelisted player, so running it 240x/sec on
+        -- a high-refresh monitor is a lot of wasted work.
+        if Config.ShowHighlight and not State.TelepathyTogOn
+           and now - lastUpdate.hover >= espInt then
+            lastUpdate.hover = now
             local p, _ = nearestToCursor()
             if p ~= State.HoverPlayer then
-                for _, h in ipairs(CoreGui:GetChildren()) do
-                    if h:IsA("Highlight") and h.Name == "HoverHL" then h:Destroy() end
-                end
                 State.HoverPlayer = p
-                if p and p.Character then
-                    local hl = Instance.new("Highlight", CoreGui)
-                    hl.Name, hl.Adornee = "HoverHL", p.Character
-                    hl.FillColor = Color3.fromRGB(255, 60, 150)
-                    hl.OutlineColor = Color3.new(1, 1, 1)
+                local hl = State.HoverHighlight
+                if not hl or not hl.Parent then
+                    hl = Instance.new("Highlight")
+                    hl.Name             = "HoverHL"
+                    hl.FillColor        = Color3.fromRGB(255, 60, 150)
+                    hl.OutlineColor     = Color3.new(1, 1, 1)
                     hl.FillTransparency = 0.85
+                    hl.Parent           = CoreGui
+                    State.HoverHighlight = hl
+                end
+                if p and p.Character then
+                    hl.Adornee = p.Character
+                    hl.Enabled = true
+                else
+                    hl.Enabled = false
+                    hl.Adornee = nil
                 end
             end
         end
