@@ -2841,6 +2841,48 @@ local function buildGUI()
         "FOV Size", 50, 600, Config.FOVSize, function(v) Config.FOVSize = v; FOV.Radius = v end)
     curY = curY + 48
 
+    -- Position the player list relative to main, with viewport-edge
+    -- awareness. Tries the right side first; if it would clip the
+    -- right edge, flips to the left of main. Y is clamped so the
+    -- panel never goes off the top or bottom of the screen.
+    local PL_GAP = 12
+    local function tb_positionPlayerList()
+        local gui = CoreGui:FindFirstChild("SelGUI")
+        local pl  = gui and gui:FindFirstChild("PlayerList")
+        if not pl then return end
+
+        local mainPos  = mainGlow.AbsolutePosition
+        local mainSize = mainGlow.AbsoluteSize
+        local plSize   = pl.AbsoluteSize
+
+        -- Viewport size from the ScreenGui itself (handles topbar inset).
+        local vp = gui.AbsoluteSize
+        if vp.X < 1 or vp.Y < 1 then
+            vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+        end
+
+        -- Prefer right side; flip to left if it would clip.
+        local xRight = mainPos.X + mainSize.X + PL_GAP
+        local xLeft  = mainPos.X - plSize.X - PL_GAP
+        local x
+        if xRight + plSize.X <= vp.X then
+            x = xRight                       -- fits on the right
+        elseif xLeft >= 0 then
+            x = xLeft                        -- doesn't fit right, flip left
+        else
+            x = math.max(0, vp.X - plSize.X) -- last resort: clamp to right edge
+        end
+
+        -- Y aligned with main top, clamped within viewport.
+        local y = math.max(0, math.min(mainPos.Y, vp.Y - plSize.Y))
+
+        pl.Position = UDim2.fromOffset(math.floor(x), math.floor(y))
+    end
+
+    -- Re-snap when main moves OR resizes (mode switch grows the panel).
+    mainGlow:GetPropertyChangedSignal("AbsolutePosition"):Connect(tb_positionPlayerList)
+    mainGlow:GetPropertyChangedSignal("AbsoluteSize"):Connect(tb_positionPlayerList)
+
     -- ── PLAYER LIST BUTTON ──
     createButton(main, UDim2.fromOffset(10, curY), UDim2.new(1, -20, 0, 36),
         "Player List", function()
@@ -2848,9 +2890,13 @@ local function buildGUI()
             local gui = CoreGui.SelGUI
             if not gui:FindFirstChild("PlayerList") then
                 -- LIST PANEL ----------------------------------
+                -- Initial position is computed by tb_positionPlayerList
+                -- below — we just create at (0,0) and let the helper
+                -- snap it to the right side of main (or left, if the
+                -- right would go off-screen).
                 local plGlow, plInner = createGlassPanel(gui,
                     UDim2.fromOffset(240, 340),
-                    UDim2.fromOffset(mainGlow.Position.X.Offset + 272, mainGlow.Position.Y.Offset)
+                    UDim2.fromOffset(0, 0)
                 )
                 plGlow.Name, plGlow.Active, plGlow.Draggable = "PlayerList", true, true
 
@@ -2896,20 +2942,19 @@ local function buildGUI()
                 GuiRefs.Template.ZIndex = 6
                 Instance.new("UICorner", GuiRefs.Template).CornerRadius = UDim.new(0, THEME.radiusElement)
             end
+            tb_positionPlayerList()
             gui.PlayerList.Visible = Config.PlayerListOpen
             if Config.PlayerListOpen then updatePlayerListUI() end
         end, THEME.accentBlue)
+    curY = curY + 44
 
-    -- keep player list attached to main panel
-    mainGlow:GetPropertyChangedSignal("Position"):Connect(function()
-        local gui = CoreGui.SelGUI
-        if gui:FindFirstChild("PlayerList") then
-            gui.PlayerList.Position = UDim2.fromOffset(
-                mainGlow.Position.X.Offset + 272,
-                mainGlow.Position.Y.Offset
-            )
-        end
-    end)
+    -- Auto-size the main panel to actual content. The panelHeight at
+    -- creation is just a starting estimate; we resize here so any
+    -- future toggle additions don't push the Player List button off
+    -- the bottom of the panel. Glow frame is +2 due to its 1-pixel
+    -- border (matches createGlassPanel's outer-frame math).
+    local finalHeight = curY + 8
+    mainGlow.Size = UDim2.fromOffset(260, finalHeight + 2)
 end
 
 ----------------------------------------------------------------
