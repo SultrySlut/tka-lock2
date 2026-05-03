@@ -129,6 +129,16 @@ local Config = {
     -- when cursor is roughly near). 50 is generous but not slack.
     TRIGGER_CURSOR_RADIUS = 50,
 
+    -- Local cooldown-bar animations. The lock fires the Q grab + click
+    -- via FireServer directly without keystrokes, so the game's own UI
+    -- scripts never animate the Q/click cooldown bars on a fire — which
+    -- looks unnatural and is a tell. With this on, we drive the bars
+    -- ourselves to mimic a real Q-tap + click combo. Visual only — does
+    -- not affect remote timing or fire rate.
+    PlayCooldownAnims     = true,
+    COOLDOWN_TAP_DURATION = 0.5,    -- linear drain time for both bars
+    COOLDOWN_INTER_DELAY  = 0.01,   -- gap between Q anim start and click anim start
+
     -- Map bounds (from alt bot CONFIG.MAP_X_MIN etc).
     -- Targets outside the rect are skipped.
     MAP_X_MIN = -1024,
@@ -2404,6 +2414,74 @@ end
 -- Fire the full 5-step push sequence. Mouse position is irrelevant —
 -- camCF is synthetic, looking from us TO the target's predicted
 -- position, which is what the server uses for throw direction.
+----------------------------------------------------------------
+--  COOLDOWN BAR ANIMATIONS  (visual only)
+--  Drives PlayerGui.Abilities.Frame.Q.Cooldown and the matching
+--  MouseButton1 cooldown ImageLabel so a lock fire looks like a
+--  real Q tap + click combo. Linear tween over the tap duration.
+--  Fire-and-forget — never blocks the remote sequence.
+----------------------------------------------------------------
+
+local _qCooldownLabel
+local _clickCooldownLabel
+local _activeQTween
+local _activeClickTween
+
+-- Lazy resolver. PlayerGui may not be fully loaded when this script
+-- first runs; resolve on demand and re-resolve if a cached label was
+-- destroyed (character respawn / GUI rebuild).
+local function tb_resolveCooldownLabels()
+    if _qCooldownLabel and _qCooldownLabel.Parent
+       and _clickCooldownLabel and _clickCooldownLabel.Parent then
+        return
+    end
+    local pg        = LocalPlayer:FindFirstChild("PlayerGui")
+    local abilities = pg and pg:FindFirstChild("Abilities")
+    local frame     = abilities and abilities:FindFirstChild("Frame")
+    if not frame then return end
+    local q  = frame:FindFirstChild("Q")
+    local mb = frame:FindFirstChild("MouseButton1")
+    _qCooldownLabel     = q  and q:FindFirstChild("Cooldown")
+    _clickCooldownLabel = mb and mb:FindFirstChild("Cooldown")
+end
+
+-- Snap the bar to FULL and tween it linearly back to empty over
+-- COOLDOWN_TAP_DURATION. Cancels any in-flight tween on the same
+-- slot so a rapid re-fire restarts cleanly instead of stacking.
+local function tb_playCooldownTween(label, slot)
+    if not label or not label.Parent then return end
+    if slot == "Q"     and _activeQTween     then _activeQTween:Cancel()     end
+    if slot == "Click" and _activeClickTween then _activeClickTween:Cancel() end
+
+    label.Visible = true
+    label.Size    = UDim2.new(1, 0, -1, 0)   -- snap to FULL
+
+    local info  = TweenInfo.new(
+        Config.COOLDOWN_TAP_DURATION,
+        Enum.EasingStyle.Linear,
+        Enum.EasingDirection.Out)
+    local goal  = { Size = UDim2.new(1, 0, 0, 0) }   -- drain to EMPTY
+    local tween = TweenService:Create(label, info, goal)
+
+    if slot == "Q" then _activeQTween = tween else _activeClickTween = tween end
+    tween:Play()
+end
+
+-- Kick off both bars. Q starts immediately, click starts COOLDOWN_INTER_DELAY
+-- later via task.delay so the fire function never yields.
+local function tb_kickoffCooldownAnims()
+    if not Config.PlayCooldownAnims then return end
+    tb_resolveCooldownLabels()
+    if _qCooldownLabel then
+        tb_playCooldownTween(_qCooldownLabel, "Q")
+    end
+    if _clickCooldownLabel then
+        task.delay(Config.COOLDOWN_INTER_DELAY, function()
+            tb_playCooldownTween(_clickCooldownLabel, "Click")
+        end)
+    end
+end
+
 local function tb_fire(target, part)
     if State.TriggerIsFiring then return end
     if not TelekinesisEvent then return end
@@ -2431,6 +2509,11 @@ local function tb_fire(target, part)
 
     local stamEvent = tb_getStaminaEvent()
     local partCF    = part.CFrame
+
+    -- Local cooldown-bar animations. Visual only — kicked off as the
+    -- very first thing so the bars start draining the moment the lock
+    -- decides to fire, exactly like a real Q tap would do.
+    tb_kickoffCooldownAnims()
 
     -- Match the alt bot's executeAttack sequence exactly:
     -- 1. Grab
@@ -2679,6 +2762,12 @@ local function buildGUI()
             "Cooldown (s)", 0.5, 3.0, Config.TRIGGER_COOLDOWN,
             function(v) Config.TRIGGER_COOLDOWN = v end)
         curY = curY + 48
+
+        createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+            "Play Cooldown Anims",
+            function() return Config.PlayCooldownAnims end,
+            function(v) Config.PlayCooldownAnims = v end)
+        curY = curY + spacing
 
         -- ── Map checks (alt-bot-ported, off by default) ──
         -- LOS isn't here because it's always-on at the gate (no toggle).
