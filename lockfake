@@ -59,7 +59,7 @@ local Config = {
     -- Proximity Force Field (invisible bubble around YOU; hex patches appear
     -- only where a player is, colored by ESP zone, flashes on zone crossing)
     ShowForceField    = false,
-    FF_BUBBLE_RADIUS  = 75,    -- studs: radius of the invisible personal bubble
+    FF_BUBBLE_RADIUS  = 30,    -- studs: radius of the invisible personal bubble
     FF_PATCH_SIZE     = 6,     -- mesh scale for hex patches
     FF_MIN_TRANS      = 0.04,  -- transparency at point-blank (lower = more solid)
     FF_FLASH_SECONDS  = 0.45,  -- duration of the crossing flash
@@ -152,6 +152,49 @@ local Config = {
     -- and skips firing entirely if we're trapped inside a flyro dome.
     -- Telek shields are NOT blocked (treated as passable).
     TriggerCheckShield    = true,
+
+    -- Structure-trapped check: skips targets sealed inside a boulder,
+    -- a small (Earth/House) house, a fallen log, or a tower roof.
+    -- These are the "always blocked" structures — no LOS exception.
+    TriggerCheckStructure = true,
+
+    -- Path-structure LOS check: targets inside the BIG HOUSE or TOWER
+    -- regions (the cylinders/rotated boxes in CONFIG.PATH_HOUSES /
+    -- CONFIG.PATH_TOWERS) are only blocked when there is NO line of
+    -- sight to their grab part. With LOS, fire normally — that's the
+    -- "you fight in there with LOS" behaviour.
+    TriggerCheckPathStructure = true,
+
+    -- Big-house volumes (each: bottom-center, width, length, bodyH, roofH, yawDeg).
+    -- Pulled from the alt bot's CONFIG.HOUSES — main room + back room.
+    PATH_HOUSES = {
+        {
+            bottom = Vector3.new(-50.335, 42.785, -413.452),
+            width  = 38.42,
+            length = 88.97,
+            bodyH  = 31.76,
+            roofH  = 7.07,
+            yawDeg = -90.0,
+        },
+        {
+            bottom = Vector3.new(-62.410, 46.185, -450.509),
+            width  = 40.00,
+            length = 47.31,
+            bodyH  = 19.26,
+            roofH  = 8.53,
+            yawDeg = 0.0,
+        },
+    },
+
+    -- Tower cylinders (each: center, radius R, height H).
+    -- Pulled from the alt bot's CONFIG.TOWERS.
+    PATH_TOWERS = {
+        { center = Vector3.new(  14.79, 64.43, -381.88), R = 16.62, H = 136.21 },
+        { center = Vector3.new(  -2.14, 65.15, -219.38), R = 16.62, H = 135.05 },
+        { center = Vector3.new(-191.47, 67.28, -272.63), R = 17.01, H = 130.44 },
+        { center = Vector3.new(-125.52, 65.61, -417.08), R = 17.39, H = 135.05 },
+        { center = Vector3.new(-961.60, 52.43,  513.25), R = 17.39, H = 122.37 },
+    },
 
     ----------------------------------------------------------------
     --  AUTO SHOCKWAVE  (Z keypress AOE — runs in BOTH modes when on)
@@ -1732,6 +1775,242 @@ local function tb_isBorderBetween(fromPos, toPos)
 end
 
 ----------------------------------------------------------------
+--  STRUCTURE CHECKS  (boulder / small-house / fallen-log / tower-roof)
+--  + PATH STRUCTURE LOS  (big-house / tower regions)
+--  Ported from alt bot's Section 11.5 + 20. Two-tier model:
+--
+--    Tier 1 — TRAPPED (TriggerCheckStructure):
+--      One downward ray from 50 studs above the target. If the ray
+--      hits a part tagged in tb_structureMap, the target is sealed
+--      under it. Always blocks. Built once at startup, cached per
+--      target for 0.05s so high firing rates don't thrash raycasts.
+--
+--    Tier 2 — PATH STRUCTURE LOS (TriggerCheckPathStructure):
+--      Geometric region tests against CONFIG.PATH_HOUSES (rotated
+--      boxes) and CONFIG.PATH_TOWERS (cylinders). If the target is
+--      inside one, we still allow firing IFF a single LOS ray from
+--      the camera to their grab part lands within 3 studs of them.
+--      No raycast cost when the geometric test rejects — only the
+--      LOS ray runs, and only for the in-region case.
+----------------------------------------------------------------
+
+-- Tier 1: structure map (boulders, small houses, fallen logs, tower roofs).
+-- Built once on first call and on workspace.World rebuilds.
+local tb_structureMap   = {}
+local tb_structureBuilt = false
+
+local function tb_buildStructureMap()
+    tb_structureMap   = {}
+    tb_structureBuilt = true
+
+    local world = workspace:FindFirstChild("World")
+    if not world then return end
+
+    -- Boulders / rocks / stones, tower roofs (parts named "tower").
+    -- Tower-region path mode handles the cylinder volume; the named
+    -- tower PARTS are the roof slabs you can be sealed under.
+    for _, obj in ipairs(world:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            local n = obj.Name:lower()
+            if n:find("boulder") or n:find("rock") or n:find("stone") then
+                tb_structureMap[obj] = "IN_BOULDER"
+            elseif n:find("tower") then
+                tb_structureMap[obj] = "IN_TOWER_ROOF"
+            end
+        end
+    end
+
+    -- Small houses (World/Earth/House/*). Big houses live in the
+    -- PATH_HOUSES region table and are handled by Tier 2.
+    local earth = world:FindFirstChild("Earth")
+    if earth then
+        for _, child in ipairs(earth:GetChildren()) do
+            if child.Name == "House" then
+                for _, desc in ipairs(child:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        tb_structureMap[desc] = "IN_HOUSE"
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallen trees / logs (World/UnAnchoredAssets/FallenTree/*).
+    local unanchored = world:FindFirstChild("UnAnchoredAssets")
+    if unanchored then
+        for _, child in ipairs(unanchored:GetChildren()) do
+            if child.Name == "FallenTree" then
+                for _, desc in ipairs(child:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        tb_structureMap[desc] = "UNDER_FALLEN_TREE"
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Pre-built raycast params (reused). Filter list is rebuilt per call
+-- because character lists churn, but the params object itself isn't.
+local tb_structureRayParams = RaycastParams.new()
+tb_structureRayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+-- Per-target cache keyed by UserId.
+local tb_structureCache    = {}
+local TB_STRUCTURE_CACHE_TTL = 0.05
+
+local function tb_buildCharacterFilter(extraChar)
+    local filter = { workspace:FindFirstChild("Characters") }
+    if extraChar then table.insert(filter, extraChar) end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character then table.insert(filter, p.Character) end
+    end
+    return filter
+end
+
+-- Returns "IN_BOULDER" / "IN_HOUSE" / "UNDER_FALLEN_TREE" /
+-- "IN_TOWER_ROOF" if the target is sealed under a structure part,
+-- false otherwise.
+local function tb_getStructureTrappedReason(plr)
+    if not plr then return false end
+    if not tb_structureBuilt then tb_buildStructureMap() end
+
+    local now    = tick()
+    local uid    = plr.UserId
+    local cached = tb_structureCache[uid]
+    if cached and (now - cached.time) < TB_STRUCTURE_CACHE_TTL then
+        return cached.result
+    end
+
+    local char = plr.Character
+    if not char then return false end
+    local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    if not head then return false end
+    local targetPos = head.Position
+
+    tb_structureRayParams.FilterDescendantsInstances = tb_buildCharacterFilter(char)
+
+    -- Fire from 50 studs above target, going down 100 studs.
+    local origin = targetPos + Vector3.new(0, 50, 0)
+    local result = workspace:Raycast(origin, Vector3.new(0, -100, 0), tb_structureRayParams)
+
+    local reason = false
+    if result and result.Position.Y > targetPos.Y then
+        reason = tb_structureMap[result.Instance] or false
+    end
+
+    tb_structureCache[uid] = { result = reason, time = now }
+    return reason
+end
+
+-- Tier 2 geometric tests against PATH_HOUSES (rotated boxes) and
+-- PATH_TOWERS (cylinders). Body-only (no roof volume) so an alt
+-- flying over the roof isn't classified as inside.
+local function tb_isInPathHouse(pos)
+    if not pos then return false end
+    local houses = Config.PATH_HOUSES
+    if not houses then return false end
+    for i = 1, math.min(2, #houses) do
+        local h = houses[i]
+        if h then
+            local yMin = h.bottom.Y
+            local yMax = h.bottom.Y + h.bodyH
+            if pos.Y >= yMin and pos.Y <= yMax then
+                local yaw = math.rad(h.yawDeg)
+                local dx  = pos.X - h.bottom.X
+                local dz  = pos.Z - h.bottom.Z
+                local cy  = math.cos(-yaw)
+                local sy  = math.sin(-yaw)
+                local lx  = dx * cy - dz * sy
+                local lz  = dx * sy + dz * cy
+                if math.abs(lx) <= h.width / 2 and math.abs(lz) <= h.length / 2 then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function tb_isInPathTower(pos)
+    if not pos then return false end
+    local towers = Config.PATH_TOWERS
+    if not towers then return false end
+    for _, t in ipairs(towers) do
+        local yMin = t.center.Y - t.H / 2
+        local yMax = t.center.Y + t.H / 2
+        if pos.Y >= yMin and pos.Y <= yMax then
+            local hDist = math.sqrt((pos.X - t.center.X) ^ 2 + (pos.Z - t.center.Z) ^ 2)
+            if hDist <= t.R then return true end
+        end
+    end
+    return false
+end
+
+local function tb_isInPathStructure(pos)
+    return tb_isInPathHouse(pos) or tb_isInPathTower(pos)
+end
+
+-- Single LOS ray from camera to grab-part. Tight 3-stud tolerance:
+-- the ray must end essentially at the target. Used as the attack gate
+-- when the target is inside a path structure.
+local function tb_hasClearLOSToGrabPart(grabPart)
+    if not grabPart then return false end
+    local fromPos = Camera.CFrame.Position
+    local toPos   = grabPart.Position
+    local dir     = toPos - fromPos
+    local dist    = dir.Magnitude
+    if dist < 1 then return true end
+
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = tb_buildCharacterFilter(LocalPlayer.Character)
+
+    local res = workspace:Raycast(fromPos, dir, rp)
+    if not res then return true end
+    return (res.Position - toPos).Magnitude < 3
+end
+
+-- Rebuild the structure map on workspace changes so freshly-streamed
+-- boulders/houses don't get missed. Throttled to avoid spamming on
+-- mass DescendantAdded bursts.
+do
+    local pending = false
+    local function scheduleRebuild()
+        if pending then return end
+        pending = true
+        task.delay(0.5, function()
+            pending = false
+            tb_buildStructureMap()
+        end)
+    end
+    local world = workspace:FindFirstChild("World")
+    if world then
+        world.DescendantAdded:Connect(function(d)
+            if d:IsA("BasePart") then
+                local n = d.Name:lower()
+                if n:find("boulder") or n:find("rock") or n:find("stone")
+                    or n:find("tower") then
+                    scheduleRebuild()
+                end
+            end
+        end)
+        local earth = world:FindFirstChild("Earth")
+        if earth then
+            earth.ChildAdded:Connect(function(c)
+                if c.Name == "House" then scheduleRebuild() end
+            end)
+        end
+        local ua = world:FindFirstChild("UnAnchoredAssets")
+        if ua then
+            ua.ChildAdded:Connect(function(c)
+                if c.Name == "FallenTree" then scheduleRebuild() end
+            end)
+        end
+    end
+end
+
+----------------------------------------------------------------
 --  SHIELD CHECKS  (flyro dome / hydro splash / alt-in-shield)
 --  Ported from alt bot's Section 10. Telek shield is ignored —
 --  the alt bot rolls 80% to grab through, but for the trigger
@@ -1894,6 +2173,26 @@ local function tb_isFightable(plr)
             if kind == "HYDRO" then return false, "HYDRO_BLOCKED" end
         end
     end
+
+    -- Tier 1 structure-trapped check. If target is in a path structure
+    -- (big house / tower region), skip Tier 1 — Tier 2 owns those volumes
+    -- and lets us fire when LOS exists. Otherwise a tower-roof hit on
+    -- someone INSIDE the tower would falsely block them.
+    if Config.TriggerCheckStructure and not tb_isInPathStructure(pos) then
+        local reason = tb_getStructureTrappedReason(plr)
+        if reason then return false, reason end
+    end
+
+    -- Tier 2 path-structure LOS check. Target inside big house or tower
+    -- region → fire only if the camera has a clear line to their grab part.
+    if Config.TriggerCheckPathStructure and tb_isInPathStructure(pos) then
+        local char = plr.Character
+        local grabPart = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+        if not grabPart or not tb_hasClearLOSToGrabPart(grabPart) then
+            return false, "PATH_STRUCT_NO_LOS"
+        end
+    end
+
     if not tb_hasLOS(plr) then
         return false, "NO_LOS"
     end
@@ -2397,6 +2696,18 @@ local function buildGUI()
             "Avoid Shielded",
             function() return Config.TriggerCheckShield end,
             function(v) Config.TriggerCheckShield = v end)
+        curY = curY + spacing
+
+        createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+            "Avoid Structure-Trapped",
+            function() return Config.TriggerCheckStructure end,
+            function(v) Config.TriggerCheckStructure = v end)
+        curY = curY + spacing
+
+        createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+            "Tower/House LOS-Only",
+            function() return Config.TriggerCheckPathStructure end,
+            function(v) Config.TriggerCheckPathStructure = v end)
         curY = curY + spacing
     end
 
