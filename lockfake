@@ -14,6 +14,18 @@ local ReplicatedStorage  = game:GetService("ReplicatedStorage")
 local CoreGui            = game:GetService("CoreGui")
 local Camera             = workspace.CurrentCamera
 local HttpService        = game:GetService("HttpService")
+local Stats              = game:GetService("Stats")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local ContextActionService = game:GetService("ContextActionService")
+
+-- Shared ping helper (used by both ESP color thresholds and the
+-- trigger bot's dynamic-range math). Returns seconds, not ms.
+local function getPingSeconds()
+    local ok, v = pcall(function()
+        return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    return ok and (v / 1000) or 0
+end
 
 ----------------------------------------------------------------
 --  REMOTES  (loaded later during loading screen)
@@ -78,6 +90,78 @@ local Config = {
 
     -- Closing-speed indicator on ESP text
     ShowClosing     = false,
+
+    -- Dynamic ESP ranges: when on, DIST_CLOSE/MED/FAR are derived from
+    -- the trigger bot's current effective range so the colors mean
+    -- something tactical (red = in push range now). Recomputes per frame.
+    -- Dynamic Range: shared by both ESP color thresholds and the
+    -- trigger bot's effective range. When on, both adjust based on
+    -- velocity + ping so colours and gates reflect actual reachable
+    -- range right now, not a static number.
+    DynamicRange     = false,
+
+    ----------------------------------------------------------------
+    --  TRIGGER BOT  (auto-fires push when target is within range
+    --  + cursor is on them via the existing FOV/LOS pipeline)
+    ----------------------------------------------------------------
+    TriggerBot           = false,           -- master enable
+    -- "recording" = fires when cursor crosses a valid target (hover-fire)
+    -- "hold"      = while LMB is held, locks the hovered target and keeps
+    --               firing on cooldown. LMB is swallowed (game doesn't see it).
+    TriggerMode          = "recording",
+    TriggerUseStaminaGate = true,           -- skip fire if stamina too low
+    TRIGGER_RANGE        = 75,              -- base max push range (matches alt bot)
+    TRIGGER_RANGE_FLOOR  = 30,              -- effective range never shrinks below this
+    -- The MouseButton1 step uses camCF as the "click point" — server
+    -- reads its LookVector to compute throw direction. If camCF aims
+    -- exactly at the target's part position, server treats it as a
+    -- close-range click and applies the AOE portion. Overshooting the
+    -- aim point past the target by this many studs keeps the click
+    -- "far away" so only the projectile portion fires.
+    TRIGGER_CLICK_OVERSHOOT = 100,
+    TRIGGER_COOLDOWN     = 1.65,            -- seconds between fires (matches alt bot)
+    TRIGGER_STAMINA_MIN  = 11.5,            -- grab stamina cost
+    TRIGGER_REPLICATION_HZ = 15,            -- server tick estimate, used for dynamic range
+    TRIGGER_INVIS_GRACE  = 0.5,             -- ignore "just-spawned invisible" briefly
+    -- Recording mode: cursor must be within this many pixels of the
+    -- target's head on screen to count as "on target". Lower = stricter
+    -- (need pixel-accurate cursor placement); higher = looser (fires
+    -- when cursor is roughly near). 50 is generous but not slack.
+    TRIGGER_CURSOR_RADIUS = 50,
+
+    -- Map bounds (from alt bot CONFIG.MAP_X_MIN etc).
+    -- Targets outside the rect are skipped.
+    MAP_X_MIN = -1024,
+    MAP_X_MAX =   638,
+    MAP_Z_MIN =  -748,
+    MAP_Z_MAX =   781,
+
+    -- Y threshold for "under the map" — positions below this Y inside the
+    -- bounds are treated as under-map (out of play).
+    UNDER_MAP_Y = -85,
+
+    -- Optional alt-bot map checks (each has its own toggle in the GUI).
+    -- Defaults are ON for safety — flip them off only if you've verified
+    -- the bot's behaviour matches what you want without them. Old
+    -- defaults were off, which let the bot push through shields, water,
+    -- terrain etc. when the user hadn't manually flipped each toggle on.
+    TriggerCheckSubmerged = true,
+    TriggerCheckUnderMap  = true,
+    TriggerCheckBorder    = true,
+    -- Shield checks: skips targets blocked by flyro/hydro shield parts,
+    -- and skips firing entirely if we're trapped inside a flyro dome.
+    -- Telek shields are NOT blocked (treated as passable).
+    TriggerCheckShield    = true,
+
+    ----------------------------------------------------------------
+    --  AUTO SHOCKWAVE  (Z keypress AOE — runs in BOTH modes when on)
+    ----------------------------------------------------------------
+    ShockwaveBot         = false,
+    SHOCKWAVE_HRANGE     = 10,              -- studs XZ
+    SHOCKWAVE_VRANGE     = 1,               -- studs abs Y delta
+    SHOCKWAVE_COOLDOWN   = 0.5,
+    SHOCKWAVE_STAMINA_MIN = 1.5,
+    SHOCKWAVE_MARGIN     = 0.5,             -- horizontal buffer so we don't fire on the edge
 }
 
 ----------------------------------------------------------------
@@ -100,7 +184,29 @@ local State = {
     Radar          = nil,  -- { gui=ScreenGui, frame=Frame, dots={[plr]=Frame} }
     LastDist       = {},   -- [plr] = last measured distance (studs)
     LastDistTime   = {},   -- [plr] = tick() when LastDist was set
-    Closing        = {}    -- [plr] = smoothed closing speed (studs/sec; negative = approaching)
+    Closing        = {},   -- [plr] = smoothed closing speed (studs/sec; negative = approaching)
+
+    -- Trigger bot
+    TriggerLastFire    = 0,        -- tick() of last fire
+    TriggerIsFiring    = false,    -- guard against re-entry
+    TriggerInvisStart  = {},       -- [userId] = when invisibility was first observed
+    TriggerLastReason  = "IDLE",   -- last gate result, surfaced in title bar status
+
+    -- Hold-LMB locked target (only used when TriggerMode == "hold")
+    LockedTarget       = nil,      -- Player instance locked at start of LMB press
+    LMBHeld            = false,    -- true between MouseButton1Down and Up
+
+    -- Saved FOV visibility, restored when trigger bot is turned off
+    SavedFOVVisible    = nil,
+
+    -- Auto shockwave (independent of trigger bot — runs in both modes)
+    LastShockwaveTime  = 0,
+    ShockIsFiring      = false,
+    ShockLastReason    = "IDLE",
+
+    -- UI mode: "select" = normal player selection, "trigger" = red trigger bot mode
+    -- The same GUI is reused; only the theme + which toggles are visible changes.
+    UIMode = "select",
 }
 
 ----------------------------------------------------------------
@@ -181,6 +287,37 @@ local THEME = {
     fontSemibold   = Enum.Font.GothamSemibold,
     fontMedium     = Enum.Font.GothamMedium,
 }
+
+----------------------------------------------------------------
+--  COLOR PALETTES  (THEME above is the live one, mutated when
+--  the user toggles between Player Selection (blue) and
+--  Trigger Bot (red) modes.)
+----------------------------------------------------------------
+local PALETTE_BLUE = {
+    panelBorder    = Color3.fromRGB(80, 120, 200),
+    glassTint      = Color3.fromRGB(30, 38, 58),
+    glassOverlay   = Color3.fromRGB(60, 80, 130),
+    titleBarTop    = Color3.fromRGB(70, 130, 220),
+    titleBarBot    = Color3.fromRGB(40, 80, 170),
+    accentBlue     = Color3.fromRGB(90, 160, 255),
+    sliderFill     = Color3.fromRGB(90, 160, 255),
+}
+
+local PALETTE_RED = {
+    panelBorder    = Color3.fromRGB(200, 80, 80),
+    glassTint      = Color3.fromRGB(50, 22, 28),
+    glassOverlay   = Color3.fromRGB(130, 60, 70),
+    titleBarTop    = Color3.fromRGB(220, 70, 90),
+    titleBarBot    = Color3.fromRGB(160, 30, 50),
+    accentBlue     = Color3.fromRGB(255, 90, 110),  -- name kept for code compatibility
+    sliderFill     = Color3.fromRGB(255, 90, 110),
+}
+
+local function applyPalette(palette)
+    for k, v in pairs(palette) do
+        THEME[k] = v
+    end
+end
 
 ----------------------------------------------------------------
 --  GUI HELPERS  (Aero / Glass style)
@@ -522,9 +659,25 @@ local function studsDistance(a, b)
 end
 
 local function colourByDist(d)
-    if d <= Config.DIST_CLOSE  then return Color3.fromRGB(255, 60, 120) end
-    if d <= Config.DIST_MEDIUM then return Color3.fromRGB(180, 80, 255) end
-    if d <= Config.DIST_FAR    then return Color3.fromRGB(90, 140, 255) end
+    -- Resolve current thresholds. In dynamic mode, the boundaries scale
+    -- with the trigger bot's effective range so the close-band always
+    -- represents "in push range right now", regardless of velocity/ping.
+    local close, medium, far
+    if Config.DynamicRange then
+        -- Use a static estimate of safe range here (no per-target velocity
+        -- because this colours all players, not just the closest one).
+        -- It's the base trigger range adjusted for ping only.
+        local lat = (1 / math.max(Config.TRIGGER_REPLICATION_HZ, 1)) + getPingSeconds() * 0.5
+        local effectiveBase = math.max(Config.TRIGGER_RANGE - lat * 50, Config.TRIGGER_RANGE_FLOOR)
+        close  = effectiveBase
+        medium = effectiveBase * 2
+        far    = effectiveBase * 4
+    else
+        close, medium, far = Config.DIST_CLOSE, Config.DIST_MEDIUM, Config.DIST_FAR
+    end
+    if d <= close  then return Color3.fromRGB(255, 60, 120) end
+    if d <= medium then return Color3.fromRGB(180, 80, 255) end
+    if d <= far    then return Color3.fromRGB(90, 140, 255) end
     return Color3.fromRGB(140, 150, 170)
 end
 
@@ -964,11 +1117,32 @@ local function updateArrows()
                         or vp.Y < 0 or vp.Y > vpSize.Y
 
                     if offscreen then
-                        local dx, dy = vp.X - cx, vp.Y - cy
-                        if vp.Z < 0 then dx, dy = -dx, -dy end
-                        if dx == 0 and dy == 0 then dy = -1 end
+                        -- Direction from screen center to where the target
+                        -- WANTS to be on screen.
+                        --
+                        -- For targets in front (vp.Z >= 0): the (vp.X, vp.Y)
+                        -- projection is valid; use it directly.
+                        --
+                        -- For targets behind (vp.Z < 0): WorldToViewportPoint
+                        -- gives a mirrored projection that can land near the
+                        -- screen center even when the target is straight
+                        -- behind us. That makes (dx, dy) small and unstable.
+                        -- Replace it with the camera-space direction projected
+                        -- onto the screen plane, which is always meaningful.
+                        local dx, dy
+                        if vp.Z >= 0 then
+                            dx, dy = vp.X - cx, vp.Y - cy
+                        else
+                            -- World→camera-space direction. Drop the Z
+                            -- component (depth), keep only the screen-plane
+                            -- bearing. Negate Y because Roblox screen-Y is
+                            -- inverted vs camera-up.
+                            local rel = cam.CFrame:PointToObjectSpace(hrp.Position)
+                            dx, dy = -rel.X, rel.Y
+                        end
+                        if dx * dx + dy * dy < 1e-6 then dy = -1 end
 
-                        local mag = math.sqrt(dx * dx + dy * dy)
+                        local mag = math.max(math.sqrt(dx * dx + dy * dy), 1e-3)
                         local ux, uy = dx / mag, dy / mag
 
                         local absUx, absUy = math.abs(ux), math.abs(uy)
@@ -1015,7 +1189,9 @@ local function updateArrows()
                         a.fill[1].From,    a.fill[1].To    = P1, P2
                         a.fill[2].From,    a.fill[2].To    = P2, P3
                         a.fill[3].From,    a.fill[3].To    = P3, P1
+                        local outlineCol = Color3.fromRGB(8, 10, 16)
                         for i = 1, 3 do
+                            a.outline[i].Color   = outlineCol  -- defensive: re-pin in case it drifted
                             a.outline[i].Visible = true
                             a.fill[i].Color      = col
                             a.fill[i].Visible    = true
@@ -1297,6 +1473,737 @@ local function fireRemote(key, hold, part)
 end
 
 ----------------------------------------------------------------
+--  TRIGGER BOT HELPERS  (ported from alt bot script)
+----------------------------------------------------------------
+local function tb_isPlayerAlive(plr)
+    if not plr then return false end
+    local char = plr.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    local ok, st = pcall(function() return hum:GetState() end)
+    if ok and st == Enum.HumanoidStateType.Dead then return false end
+    return true
+end
+
+local function tb_getStamina()
+    local myChar = LocalPlayer.Character
+    local stam = myChar and myChar:FindFirstChild("Stamina")
+    if not stam then return nil end
+    if stam:IsA("IntValue") or stam:IsA("NumberValue") then
+        return stam.Value
+    elseif stam:FindFirstChild("Value") then
+        return stam.Value.Value
+    end
+    return nil
+end
+
+local function tb_getRoot(plr)
+    local char = plr and plr.Character
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart")
+        or char:FindFirstChild("Torso")
+        or char:FindFirstChild("UpperTorso")
+end
+
+-- Invisibility check w/ grace window so freshly-spawned chars don't
+-- get rejected during their <0.5s "invisible until rendered" frame.
+-- Raw invisibility check (no grace window). Ported from alt bot's
+-- isTargetInvisible. Two signals:
+--   1. workspace.Characters[plr.Name].Invisible is true
+--   2. Target character is missing Head or HumanoidRootPart
+-- Either one means "currently invisible". The grace window is layered
+-- on in tb_isTargetInvisible below so freshly-spawned targets (briefly
+-- missing parts during character build) aren't immediately rejected.
+local function tb_isInvisibleRaw(plr)
+    if not plr then return false end
+
+    -- Workspace.Characters mirror — game-side flag set when player goes invis
+    local chars = workspace:FindFirstChild("Characters")
+    if chars then
+        local targetChar = chars:FindFirstChild(plr.Name)
+        if targetChar then
+            local invisible = targetChar:FindFirstChild("Invisible")
+            if invisible and invisible:IsA("BoolValue") and invisible.Value then
+                return true
+            end
+        end
+    end
+
+    -- Missing parts — target character isn't fully constructed
+    local char = plr.Character
+    if not char then return true end
+    if not char:FindFirstChild("Head") then return true end
+    if not tb_getRoot(plr) then return true end
+
+    return false
+end
+
+local function tb_isTargetInvisible(plr)
+    local raw = tb_isInvisibleRaw(plr)
+    local uid = plr.UserId
+    local now = tick()
+    if raw then
+        if not State.TriggerInvisStart[uid] then
+            State.TriggerInvisStart[uid] = now
+        end
+        return (now - State.TriggerInvisStart[uid]) > Config.TRIGGER_INVIS_GRACE
+    else
+        State.TriggerInvisStart[uid] = nil
+        return false
+    end
+end
+
+local function tb_isOutsideMap(pos)
+    if not pos then return false end
+    return pos.X < Config.MAP_X_MIN or pos.X > Config.MAP_X_MAX
+        or pos.Z < Config.MAP_Z_MIN or pos.Z > Config.MAP_Z_MAX
+end
+
+----------------------------------------------------------------
+--  ALT-BOT-PORTED MAP CHECKS
+--  (no-chase zones, water/submerged, under-map, border barrier)
+----------------------------------------------------------------
+local Terrain = workspace:FindFirstChildOfClass("Terrain")
+
+-- Build a reusable OverlapParams for water-part detection
+local tb_waterOverlap = OverlapParams.new()
+tb_waterOverlap.FilterType = Enum.RaycastFilterType.Blacklist
+
+local function tb_isWaterPart(part)
+    if not part or not part:IsA("BasePart") then return false end
+    if part.Material == Enum.Material.Water then return true end
+    return string.find(string.lower(part.Name or ""), "water") ~= nil
+end
+
+local function tb_terrainWaterAt(point)
+    if not Terrain or not Terrain.ReadVoxels or not point then return false end
+    if math.abs(point.X) > 10000 or math.abs(point.Y) > 10000 or math.abs(point.Z) > 10000 then
+        return false
+    end
+    local snapped = Vector3.new(
+        math.floor(point.X / 4) * 4 + 2,
+        math.floor(point.Y / 4) * 4 + 2,
+        math.floor(point.Z / 4) * 4 + 2
+    )
+    local half = Vector3.new(2, 2, 2)
+    local region = Region3.new(snapped - half, snapped + half):ExpandToGrid(4)
+    local ok, materials = pcall(function()
+        return Terrain:ReadVoxels(region, 4)
+    end)
+    if not ok or not materials then return false end
+    for x = 1, #materials do
+        local col = materials[x]; if col then
+            for y = 1, #col do
+                local row = col[y]; if row then
+                    for z = 1, #row do
+                        if row[z] == Enum.Material.Water then return true end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function tb_waterAt(point, ignoreChar)
+    if not point then return false end
+    if tb_terrainWaterAt(point) then return true end
+    tb_waterOverlap.FilterDescendantsInstances = ignoreChar and {ignoreChar} or {}
+    local ok, parts = pcall(function()
+        return workspace:GetPartBoundsInBox(CFrame.new(point), Vector3.new(4, 4, 4), tb_waterOverlap)
+    end)
+    if not ok or not parts then return false end
+    for _, p in ipairs(parts) do
+        if tb_isWaterPart(p) then return true end
+    end
+    return false
+end
+
+-- Submerged check: target's head is in water (matches alt bot's
+-- isPlayerSubmerged). Used to skip targets fighting underwater unless
+-- we are too — but for the trigger bot we just always skip them when
+-- the toggle is on; recording-mode pushes don't work well in water.
+local function tb_isSubmerged(plr)
+    local char = plr and plr.Character
+    if not char then return false end
+    local head = char:FindFirstChild("Head")
+    if not head then return false end
+    return tb_waterAt(head.Position, char)
+end
+
+-- Under-map: target's head is inside solid terrain (alt bot voxel
+-- check). High occupancy + non-air/water material = clipped under.
+local function tb_isUnderMap(plr)
+    local char = plr and plr.Character
+    if not char then return false end
+    local head = char:FindFirstChild("Head")
+    if not head then return false end
+    local pos = head.Position
+    local s = 2
+    local region = Region3.new(pos - Vector3.new(s, s, s), pos + Vector3.new(s, s, s)):ExpandToGrid(4)
+    local ok, materials, occupancy = pcall(function()
+        return Terrain:ReadVoxels(region, 4)
+    end)
+    if not ok or not materials or not occupancy then return false end
+    local sx, sy, sz = #materials, #materials[1], #materials[1][1]
+    local cx = math.floor((sx + 1) / 2)
+    local cy = math.floor((sy + 1) / 2)
+    local cz = math.floor((sz + 1) / 2)
+    local mat = materials[cx][cy][cz]
+    local occ = occupancy[cx][cy][cz]
+    if mat ~= Enum.Material.Air and mat ~= Enum.Material.Water and occ >= 0.9 then
+        return true
+    end
+    -- Also flag positions below UNDER_MAP_Y inside map bounds
+    if pos.Y < Config.UNDER_MAP_Y
+       and pos.X >= Config.MAP_X_MIN and pos.X <= Config.MAP_X_MAX
+       and pos.Z >= Config.MAP_Z_MIN and pos.Z <= Config.MAP_Z_MAX then
+        return true
+    end
+    return false
+end
+
+-- Border barrier detection. Borders live in workspace.World.RayIgnore.Borders
+-- with CanQuery = false, so normal raycasts skip them — we do manual
+-- ray-vs-OBB intersection. (Skipped if folder doesn't exist on this map.)
+local function tb_getBordersFolder()
+    local w = workspace:FindFirstChild("World")
+    local ri = w and w:FindFirstChild("RayIgnore")
+    return ri and ri:FindFirstChild("Borders")
+end
+
+local function tb_gatherBorderParts()
+    local out = {}
+    local folder = tb_getBordersFolder()
+    if not folder then return out end
+    for _, inst in ipairs(folder:GetChildren()) do
+        if inst.Name ~= "WaterBorder" then  -- WaterBorder isn't a wall
+            if inst:IsA("BasePart") then
+                table.insert(out, inst)
+            else
+                local p = inst:FindFirstChildWhichIsA("BasePart", true)
+                if p then table.insert(out, p) end
+            end
+        end
+    end
+    return out
+end
+
+local function tb_rayHitsOBB(origin, dirUnit, maxDist, part)
+    local cf = part.CFrame
+    local half = part.Size * 0.5
+    local o = cf:PointToObjectSpace(origin)
+    local d = cf:VectorToObjectSpace(dirUnit)
+    local tmin, tmax = 0, maxDist
+    local function slab(oc, dc, lo, hi)
+        local eps = 1e-8
+        if math.abs(dc) < eps then
+            if oc < lo or oc > hi then return nil end
+            return tmin, tmax
+        end
+        local t1, t2 = (lo - oc) / dc, (hi - oc) / dc
+        local a, b = math.min(t1, t2), math.max(t1, t2)
+        local nm, nx = math.max(tmin, a), math.min(tmax, b)
+        if nm > nx then return nil end
+        return nm, nx
+    end
+    local nm, nx = slab(o.X, d.X, -half.X, half.X); if not nm then return nil end; tmin, tmax = nm, nx
+        nm, nx = slab(o.Y, d.Y, -half.Y, half.Y); if not nm then return nil end; tmin, tmax = nm, nx
+        nm, nx = slab(o.Z, d.Z, -half.Z, half.Z); if not nm then return nil end; tmin, tmax = nm, nx
+    local tHit = (tmin >= 0) and tmin or tmax
+    if tHit < 0 or tHit > maxDist then return nil end
+    return tHit
+end
+
+local function tb_isBorderBetween(fromPos, toPos)
+    if not fromPos or not toPos then return false end
+    local borders = tb_gatherBorderParts()
+    if #borders == 0 then return false end
+    local origin = fromPos + Vector3.new(0, 2, 0)
+    local target = toPos   + Vector3.new(0, 2, 0)
+    local dir = target - origin
+    local dist = dir.Magnitude
+    if dist < 1 then return false end
+    local dirUnit = dir / dist
+    for _, part in ipairs(borders) do
+        if tb_rayHitsOBB(origin, dirUnit, dist, part) then return true end
+    end
+    return false
+end
+
+----------------------------------------------------------------
+--  SHIELD CHECKS  (flyro dome / hydro splash / alt-in-shield)
+--  Ported from alt bot's Section 10. Telek shield is ignored —
+--  the alt bot rolls 80% to grab through, but for the trigger
+--  bot we just don't classify telek hits as a block.
+----------------------------------------------------------------
+
+local function tb_hasMarker(part, markerName)
+    if not part then return false end
+    if part:FindFirstChild(markerName) then return true end
+    local parent = part.Parent
+    return parent and parent:FindFirstChild(markerName) ~= nil
+end
+
+local function tb_getShieldContainers()
+    local world = workspace:FindFirstChild("World")
+    if not world then return {} end
+    local out = {}
+    local sp = world:FindFirstChild("ShieldParts")
+    if sp then table.insert(out, sp) end
+    local sp2 = world:FindFirstChild("ShieldPart")
+    if sp2 then table.insert(out, sp2) end
+    return out
+end
+
+-- Flyro dome detection: dual-signal so a single stray ray-hit doesn't
+-- false-positive. Both rays must hit a Forceshield-marked part:
+--   A) ray from us to target hits one
+--   B) 50-stud ray straight up from target hits one
+local function tb_isInFlyroShield(targetPos)
+    if not targetPos then return false end
+    local myRoot = tb_getRoot(LocalPlayer)
+    if not myRoot then return false end
+    local myPos = myRoot.Position
+
+    local containers = tb_getShieldContainers()
+    if #containers == 0 then return false end
+
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Whitelist
+    rp.FilterDescendantsInstances = containers
+
+    local resA = workspace:Raycast(myPos, targetPos - myPos, rp)
+    local sigA = resA and tb_hasMarker(resA.Instance, "Forceshield")
+
+    local resB = workspace:Raycast(targetPos, Vector3.new(0, 50, 0), rp)
+    local sigB = resB and tb_hasMarker(resB.Instance, "Forceshield")
+
+    return sigA and sigB
+end
+
+-- Path blocking: returns "FLYRO" or "HYDRO" if a shield is between us
+-- and target, nil otherwise. Telek shields return nil (we treat them
+-- as passable). Only fired when the path raycast actually hits a
+-- shield part — no shields = no block.
+local function tb_shieldBlocking(fromPos, toPos)
+    if not fromPos or not toPos then return nil end
+    local containers = tb_getShieldContainers()
+    if #containers == 0 then return nil end
+    local dir = toPos - fromPos
+    if dir.Magnitude < 1e-6 then return nil end
+
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Whitelist
+    rp.FilterDescendantsInstances = containers
+
+    local res = workspace:Raycast(fromPos, dir, rp)
+    if res and res.Instance then
+        if tb_hasMarker(res.Instance, "Forceshield") then return "FLYRO" end
+        if tb_hasMarker(res.Instance, "Splash")      then return "HYDRO" end
+        -- Telek shield (or unmarked shield part) — ignored
+    end
+    return nil
+end
+
+-- Alt-inside-shield detection: 50-stud ray straight up from us. If
+-- it hits a Forceshield, we're inside a flyro dome and can't attack
+-- out. (Same approach as alt bot's isAltInsideShield.)
+local function tb_isAltInsideShield()
+    local myRoot = tb_getRoot(LocalPlayer)
+    if not myRoot then return false end
+    local containers = tb_getShieldContainers()
+    if #containers == 0 then return false end
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Whitelist
+    rp.FilterDescendantsInstances = containers
+    local res = workspace:Raycast(myRoot.Position, Vector3.new(0, 50, 0), rp)
+    return res and tb_hasMarker(res.Instance, "Forceshield")
+end
+
+-- Effective range for the current frame, accounting for closing/separating
+-- velocity vs target + replication lag + ping. If DynamicRange is off,
+-- returns the static base range.
+local function tb_getSafeRange(myPos, targetPos)
+    if not Config.DynamicRange then return Config.TRIGGER_RANGE end
+    local myRoot = tb_getRoot(LocalPlayer)
+    local myVel  = (myRoot and myRoot.AssemblyLinearVelocity) or Vector3.zero
+
+    local latency = (1 / math.max(Config.TRIGGER_REPLICATION_HZ, 1)) + getPingSeconds() * 0.5
+    local to      = targetPos - myPos
+    local toDist  = to.Magnitude
+    local adjust  = 0
+    if toDist > 0.01 then
+        local unit = to / toDist
+        local velToward = myVel:Dot(unit)
+        adjust = velToward * latency
+    end
+    return math.max(Config.TRIGGER_RANGE + adjust, Config.TRIGGER_RANGE_FLOOR)
+end
+
+-- Fightability gate. Reuses nearestToCursor's whitelist + LOS, so we
+-- only need to add the alive/invis/range/stamina checks on top.
+-- LOS check for a specific target. Returns true if the target is
+-- visible from the camera, false if a wall/object blocks the ray.
+-- Honored at the fightable gate (Config.TriggerCheckLOS) and reused
+-- for the locked-target mode in the picker dispatch.
+local function tb_hasLOS(plr)
+    if Config.WallBang then return true end
+    local char = plr and plr.Character
+    local part = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+    if not part then return false end
+    local rp = RaycastParams.new()
+    rp.FilterDescendantsInstances = {LocalPlayer.Character}
+    rp.FilterType = Enum.RaycastFilterType.Blacklist
+    local res = workspace:Raycast(Camera.CFrame.Position, part.Position - Camera.CFrame.Position, rp)
+    return res and res.Instance:IsDescendantOf(char)
+end
+
+local function tb_isFightable(plr)
+    if not plr                              then return false, "NIL" end
+    if plr == LocalPlayer                   then return false, "SELF" end
+    if not tb_isPlayerAlive(plr)            then return false, "DEAD" end
+    if tb_isTargetInvisible(plr)            then return false, "INVISIBLE" end
+    local pos = tb_getRoot(plr) and tb_getRoot(plr).Position
+    if not pos                              then return false, "NO_POS" end
+    if tb_isOutsideMap(pos)                 then return false, "OUTSIDE_MAP" end
+
+    if Config.TriggerCheckSubmerged and tb_isSubmerged(plr) then
+        return false, "SUBMERGED"
+    end
+    if Config.TriggerCheckUnderMap and tb_isUnderMap(plr) then
+        return false, "UNDER_MAP"
+    end
+    if Config.TriggerCheckBorder then
+        local myRoot = tb_getRoot(LocalPlayer)
+        if myRoot and tb_isBorderBetween(myRoot.Position, pos) then
+            return false, "BORDER_BLOCKED"
+        end
+    end
+    if Config.TriggerCheckShield then
+        if tb_isAltInsideShield() then
+            return false, "ALT_IN_SHIELD"
+        end
+        if tb_isInFlyroShield(pos) then
+            return false, "FLYRO_DOME"
+        end
+        local myRoot = tb_getRoot(LocalPlayer)
+        if myRoot then
+            local kind = tb_shieldBlocking(myRoot.Position, pos)
+            if kind == "FLYRO" then return false, "FLYRO_BLOCKED" end
+            if kind == "HYDRO" then return false, "HYDRO_BLOCKED" end
+        end
+    end
+    if not tb_hasLOS(plr) then
+        return false, "NO_LOS"
+    end
+
+    return true, "OK"
+end
+
+-- Returns the player + grab-part to fire on, or nil if no valid target.
+-- Recording-mode fires whenever the cursor is OVER a target (within
+-- TRIGGER_CURSOR_RADIUS pixels of the target's head on screen). Without
+-- this radius, the picker would just pick whoever's closest on-screen
+-- and fire at them even if the cursor is nowhere near — that's why we
+-- saw random-fires earlier.
+local function tb_pickTarget()
+    local m2 = Vector2.new(Mouse.X, Mouse.Y)
+    local maxPx = Config.TRIGGER_CURSOR_RADIUS or 50
+    local bestP, bestPart, bestPx = nil, nil, maxPx
+    for plr, char in pairs(State.Characters) do
+        if State.Whitelist[plr] then
+            local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+            if part then
+                local vp, onScr = Camera:WorldToViewportPoint(part.Position)
+                if onScr then
+                    local px = (m2 - Vector2.new(vp.X, vp.Y)).Magnitude
+                    if px < bestPx then
+                        local visible = true
+                        if not Config.WallBang then
+                            local rp = RaycastParams.new()
+                            rp.FilterDescendantsInstances = {LocalPlayer.Character}
+                            rp.FilterType = Enum.RaycastFilterType.Blacklist
+                            local res = workspace:Raycast(Camera.CFrame.Position, part.Position - Camera.CFrame.Position, rp)
+                            visible = res and res.Instance:IsDescendantOf(char)
+                        end
+                        if visible then
+                            bestP, bestPart, bestPx = plr, part, px
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return bestP, bestPart
+end
+
+-- Resolve the grab-part for a specific player. Used for locked-target
+-- mode where we already know who to fire on.
+local function tb_resolvePart(plr)
+    local char = plr and plr.Character
+    if not char then return nil end
+    return char:FindFirstChild("Head")
+        or char:FindFirstChild("HumanoidRootPart")
+        or char:FindFirstChild("Torso")
+        or char:FindFirstChild("UpperTorso")
+end
+
+local function tb_canFireNow()
+    if not Config.TriggerBot                then return false, "DISABLED" end
+    local now = tick()
+    if now - State.TriggerLastFire < Config.TRIGGER_COOLDOWN then
+        return false, "COOLDOWN"
+    end
+    if Config.TriggerUseStaminaGate then
+        local s = tb_getStamina()
+        if s and s < Config.TRIGGER_STAMINA_MIN then
+            return false, "LOW_STAMINA"
+        end
+    end
+
+    -- Pick target by mode:
+    --   recording mode → fire whenever cursor is on a valid target
+    --                    (cursor proximity gate is in tb_pickTarget)
+    --   hold mode      → require LMB held + acquire lock at LMB-down,
+    --                    fire at locked target while held
+    local plr, part
+    if Config.TriggerMode == "hold" then
+        if not State.LMBHeld then return false, "LMB_NOT_HELD" end
+        if not State.LockedTarget then return false, "NO_LOCK" end
+        plr  = State.LockedTarget
+        part = tb_resolvePart(plr)
+        if not part then return false, "LOCK_LOST" end
+        -- Locked mode still gates LOS so shots don't go through walls
+        -- when the target ducks behind cover. Resumes when LOS returns.
+        if not tb_hasLOS(plr) then return false, "LOCK_NO_LOS" end
+    else
+        plr, part = tb_pickTarget()
+        if not plr or not part then return false, "NO_TARGET" end
+    end
+
+    local ok, reason = tb_isFightable(plr)
+    if not ok then return false, reason end
+
+    local myRoot = tb_getRoot(LocalPlayer)
+    local theirRoot = tb_getRoot(plr)
+    if not myRoot or not theirRoot then return false, "NO_POS" end
+
+    local myPos     = myRoot.Position
+    local targetPos = theirRoot.Position
+    local safeRange = tb_getSafeRange(myPos, targetPos)
+    if (myPos - targetPos).Magnitude > safeRange then
+        return false, "OUT_OF_RANGE"
+    end
+
+    return true, "READY", plr, part
+end
+
+----------------------------------------------------------------
+--  LMB SWALLOW + LOCK ACQUISITION  (hold-fire mode)
+----------------------------------------------------------------
+-- We bind LMB through ContextActionService at high priority and return
+-- Sink, which prevents the click from reaching the game's own click
+-- handlers. On press: capture whatever the cursor is hovering as the
+-- locked target (if it's a valid target). On release: clear lock.
+local LMB_BIND_NAME = "TriggerBot_LMBSwallow"
+
+local function tb_onLMB(actionName, inputState, inputObj)
+    if inputState == Enum.UserInputState.Begin then
+        State.LMBHeld = true
+        -- Only acquire a locked target in hold mode. In recording mode,
+        -- LMB just arms firing on whatever the cursor is currently over.
+        if Config.TriggerMode == "hold" then
+            -- First try: the strict cursor-radius pick. If nothing's
+            -- under the cursor, fall back to the closest-on-screen
+            -- whitelisted player so the user doesn't have to be
+            -- pixel-precise on the click.
+            local plr, _ = tb_pickTarget()
+            if not plr then
+                local m2 = Vector2.new(Mouse.X, Mouse.Y)
+                local bestPx = math.huge
+                for p, char in pairs(State.Characters) do
+                    if State.Whitelist[p] then
+                        local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+                        if part then
+                            local vp, onScr = Camera:WorldToViewportPoint(part.Position)
+                            if onScr then
+                                local px = (m2 - Vector2.new(vp.X, vp.Y)).Magnitude
+                                if px < bestPx then
+                                    bestPx, plr = px, p
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            State.LockedTarget = plr
+            print("[TB] Lock acquired:", plr and plr.Name or "(none)")
+        end
+    elseif inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
+        State.LMBHeld      = false
+        State.LockedTarget = nil
+    end
+    return Enum.ContextActionResult.Sink
+end
+
+-- Idempotent — call any time to make the binding match current config.
+-- Only bound in hold mode, where LMB is the arm-and-lock gate. In
+-- recording mode LMB passes through normally so your usual push
+-- click/manual interactions still work alongside the auto-trigger.
+local function tb_updateLMBBind()
+    local shouldBind = Config.TriggerBot and Config.TriggerMode == "hold"
+    if shouldBind then
+        ContextActionService:BindActionAtPriority(
+            LMB_BIND_NAME,
+            tb_onLMB,
+            false,
+            Enum.ContextActionPriority.High.Value,
+            Enum.UserInputType.MouseButton1
+        )
+    else
+        pcall(function() ContextActionService:UnbindAction(LMB_BIND_NAME) end)
+        -- Clear any stale lock state so next mode-flip starts fresh
+        State.LMBHeld      = false
+        State.LockedTarget = nil
+    end
+end
+
+-- Resolves the local player's StaminaEvent (re-resolved each fire because
+-- the character can respawn).
+local function tb_getStaminaEvent()
+    local myChar = LocalPlayer.Character
+    return myChar
+        and myChar:FindFirstChild("Stamina")
+        and myChar.Stamina:FindFirstChild("StaminaEvent")
+end
+
+-- Predicted target position for direction aiming. Uses relative velocity
+-- and one frame of latency so the throw lands where the target will be,
+-- not where they were. Same approach as the alt bot.
+local function tb_getPredictedPos(target)
+    local theirRoot = tb_getRoot(target)
+    if not theirRoot then return nil end
+    local myRoot   = tb_getRoot(LocalPlayer)
+    local myVel    = (myRoot    and myRoot.AssemblyLinearVelocity)    or Vector3.zero
+    local theirVel = (theirRoot and theirRoot.AssemblyLinearVelocity) or Vector3.zero
+    local relVel   = theirVel - myVel
+    local latency  = (1 / math.max(Config.TRIGGER_REPLICATION_HZ, 1)) + getPingSeconds() * 0.5
+    return theirRoot.Position + relVel * latency
+end
+
+-- Fire the full 5-step push sequence. Mouse position is irrelevant —
+-- camCF is synthetic, looking from us TO the target's predicted
+-- position, which is what the server uses for throw direction.
+local function tb_fire(target, part)
+    if State.TriggerIsFiring then return end
+    if not TelekinesisEvent then return end
+    if not target or not part then return end
+    State.TriggerIsFiring = true
+
+    local myRoot = tb_getRoot(LocalPlayer)
+    if not myRoot then State.TriggerIsFiring = false; return end
+
+    -- Build a synthetic look-at CFrame for the throw direction. We aim
+    -- PAST the target by TRIGGER_CLICK_OVERSHOOT studs so the server
+    -- doesn't interpret the MouseButton1 step as a close-range click —
+    -- direction is unchanged (still through the target), but the click
+    -- point is far enough away that only the projectile portion hits.
+    local predicted = tb_getPredictedPos(target) or part.Position
+    local camPos    = Camera.CFrame.Position
+    local toTarget  = predicted - camPos
+    local dist      = toTarget.Magnitude
+    local aimAt     = predicted
+    if dist > 0.01 then
+        local dirUnit = toTarget / dist
+        aimAt = predicted + dirUnit * Config.TRIGGER_CLICK_OVERSHOOT
+    end
+    local camCF     = CFrame.new(camPos, aimAt)
+
+    local stamEvent = tb_getStaminaEvent()
+    local partCF    = part.CFrame
+
+    -- Match the alt bot's executeAttack sequence exactly:
+    -- 1. Grab
+    pcall(function() TelekinesisEvent:FireServer("Q", true, camCF, part, partCF) end)
+    -- 2. Stamina hold
+    if stamEvent then
+        pcall(function() stamEvent:FireServer("StaminaHold", true) end)
+    end
+    -- 3. Throw
+    pcall(function() TelekinesisEvent:FireServer("MouseButton1", true, camCF, part, partCF) end)
+    -- 4. Release grab
+    pcall(function() TelekinesisEvent:FireServer("Q", false, camCF, part, partCF) end)
+    -- 5. Stamina release
+    if stamEvent then
+        pcall(function() stamEvent:FireServer("StaminaHold", false) end)
+    end
+
+    State.TriggerLastFire = tick()
+    State.TriggerIsFiring = false
+end
+
+-- Shockwave: simple Z keypress. The game's local script handles it,
+-- which means the cooldown UI animates normally. Press → release pair
+-- so it doesn't repeat. task.delay so the release always lands.
+local function tb_fireShockwave()
+    if State.ShockIsFiring then return end
+    State.ShockIsFiring = true
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Z, false, game)
+    end)
+    task.delay(0.05, function()
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Z, false, game)
+        end)
+    end)
+    State.LastShockwaveTime = tick()
+    State.ShockIsFiring = false
+end
+
+-- Can the shockwave fire right now? AOE so no cursor needed; just
+-- needs a fightable target inside the small AOE cylinder.
+local function tb_canShockwave()
+    if not Config.ShockwaveBot then return false, "DISABLED" end
+    local now = tick()
+    if now - (State.LastShockwaveTime or 0) < Config.SHOCKWAVE_COOLDOWN then
+        return false, "COOLDOWN"
+    end
+    if Config.TriggerUseStaminaGate then
+        local s = tb_getStamina()
+        if s and s < Config.SHOCKWAVE_STAMINA_MIN then
+            return false, "LOW_STAMINA"
+        end
+    end
+    local myRoot = tb_getRoot(LocalPlayer)
+    if not myRoot then return false, "NO_POS" end
+    local myPos = myRoot.Position
+
+    -- Find any whitelisted, fightable, in-AOE player
+    for plr, _ in pairs(State.Characters) do
+        if State.Whitelist[plr] then
+            local ok = tb_isFightable(plr)
+            if ok then
+                local theirRoot = tb_getRoot(plr)
+                if theirRoot then
+                    local p   = theirRoot.Position
+                    -- Predict their position at fire time
+                    local predicted = tb_getPredictedPos(plr) or p
+                    local dx, dz = predicted.X - myPos.X, predicted.Z - myPos.Z
+                    local h  = math.sqrt(dx*dx + dz*dz)
+                    local v  = math.abs(predicted.Y - myPos.Y)
+                    if h <= (Config.SHOCKWAVE_HRANGE - Config.SHOCKWAVE_MARGIN)
+                       and v <= Config.SHOCKWAVE_VRANGE then
+                        return true, "READY"
+                    end
+                end
+            end
+        end
+    end
+    return false, "NO_TARGET_IN_AOE"
+end
+
+----------------------------------------------------------------
 --  INPUT HANDLERS
 ----------------------------------------------------------------
 local function onInputBegan(inp, gp)
@@ -1344,29 +2251,198 @@ end
 --  GUI CONSTRUCTION
 ----------------------------------------------------------------
 local function buildGUI()
+    -- Destroy any prior GUI so this is idempotent (used when toggling
+    -- between Player Selection / Trigger Bot modes).
+    for _, g in ipairs(CoreGui:GetChildren()) do
+        if g.Name == "SelGUI" or g.Name == "PlayerListGUI" then g:Destroy() end
+    end
+
+    -- Apply palette for current mode BEFORE creating any UI so all
+    -- newly-created elements pick up the theme automatically.
+    if State.UIMode == "trigger" then
+        applyPalette(PALETTE_RED)
+    else
+        applyPalette(PALETTE_BLUE)
+    end
+
     local sg = Instance.new("ScreenGui", CoreGui)
     sg.Name, sg.ResetOnSpawn = "SelGUI", false
 
     -- MAIN PANEL -----------------------------------------------
+    local panelHeight = (State.UIMode == "trigger") and 1095 or 730
     local mainGlow, main = createGlassPanel(sg,
-        UDim2.fromOffset(260, 660),
-        UDim2.fromOffset(14, 280)
+        UDim2.fromOffset(260, panelHeight),
+        UDim2.fromOffset(14, 200)
     )
     mainGlow.Name = "Main"
     main.Name = "Inner"
     mainGlow.Active, mainGlow.Draggable = true, true
     mainGlow.Visible = Config.GUIVisible
 
-    createTitleBar(main, "Player Selection")
+    local title = (State.UIMode == "trigger") and "Auto Push" or "Player Selection"
+    createTitleBar(main, title)
 
     local curY = 48
     local spacing = 32
 
+    -- ── MODE section ── (always visible; toggles between Selection / Trigger)
+    createSectionLabel(main, curY, "Mode"); curY = curY + 18
+    createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+        "Auto Push Mode",
+        function() return State.UIMode == "trigger" end,
+        function(v)
+            State.UIMode = v and "trigger" or "select"
+            -- Trigger bot is implicitly on whenever we're in trigger mode.
+            -- The mode toggle IS the master switch — no separate Enable.
+            Config.TriggerBot = v
+            tb_updateLMBBind()
+            -- FOV circle is for manual selection only; hide it while the
+            -- trigger bot is active so it doesn't clutter recordings.
+            if v then
+                State.SavedFOVVisible = FOV.Visible
+                FOV.Visible = false
+            elseif State.SavedFOVVisible ~= nil then
+                FOV.Visible = State.SavedFOVVisible
+                State.SavedFOVVisible = nil
+            end
+            -- Rebuild the GUI so the theme + visible sections refresh.
+            -- task.defer so we don't destroy the GUI we're currently
+            -- handling input from.
+            task.defer(buildGUI)
+        end)
+    curY = curY + spacing
+
+    -- ── TRIGGER BOT section ── (only visible in trigger mode)
+    if State.UIMode == "trigger" then
+        createSeparator(main, curY); curY = curY + 6
+        createSectionLabel(main, curY, "Auto Push"); curY = curY + 18
+
+        -- Trigger Mode segmented control (Recording / Hold). Two side-by-side
+        -- buttons; the active one is highlighted in the accent color.
+        do
+            local rowH = 30
+            createSectionLabel(main, curY, "Trigger Mode"); curY = curY + 18
+            local btnRow = Instance.new("Frame", main)
+            btnRow.Position = UDim2.fromOffset(4, curY)
+            btnRow.Size = UDim2.new(1, -8, 0, rowH)
+            btnRow.BackgroundTransparency = 1
+            btnRow.ZIndex = 4
+
+            local recBtn, holdBtn  -- forward refs so both callbacks can update both
+            local function refreshSeg()
+                local isRec = Config.TriggerMode == "recording"
+                recBtn.BackgroundColor3  = isRec and THEME.accentBlue or THEME.toggleOff
+                holdBtn.BackgroundColor3 = (not isRec) and THEME.accentBlue or THEME.toggleOff
+                recBtn.BackgroundTransparency  = isRec and 0.15 or 0.4
+                holdBtn.BackgroundTransparency = (not isRec) and 0.15 or 0.4
+            end
+
+            recBtn = createButton(btnRow,
+                UDim2.fromOffset(0, 0), UDim2.new(0.5, -2, 1, 0),
+                "Trigger Bot", function()
+                    Config.TriggerMode = "recording"
+                    tb_updateLMBBind()
+                    refreshSeg()
+                end)
+            holdBtn = createButton(btnRow,
+                UDim2.new(0.5, 2, 0, 0), UDim2.new(0.5, -2, 1, 0),
+                "Hold LMB", function()
+                    Config.TriggerMode = "hold"
+                    tb_updateLMBBind()
+                    refreshSeg()
+                end)
+            refreshSeg()
+            curY = curY + rowH + 8
+        end
+
+        createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+            "Stamina Gate",
+            function() return Config.TriggerUseStaminaGate end,
+            function(v) Config.TriggerUseStaminaGate = v end)
+        curY = curY + spacing
+
+        createSlider(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 40),
+            "Range (studs)", 30, 150, Config.TRIGGER_RANGE,
+            function(v) Config.TRIGGER_RANGE = v end)
+        curY = curY + 48
+
+        createSlider(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 40),
+            "Cooldown (s)", 0.5, 3.0, Config.TRIGGER_COOLDOWN,
+            function(v) Config.TRIGGER_COOLDOWN = v end)
+        curY = curY + 48
+
+        -- ── Map checks (alt-bot-ported, off by default) ──
+        -- LOS isn't here because it's always-on at the gate (no toggle).
+        createSectionLabel(main, curY, "Map Checks"); curY = curY + 18
+
+        createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+            "Avoid Submerged",
+            function() return Config.TriggerCheckSubmerged end,
+            function(v) Config.TriggerCheckSubmerged = v end)
+        curY = curY + spacing
+
+        createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+            "Avoid Under-Map",
+            function() return Config.TriggerCheckUnderMap end,
+            function(v) Config.TriggerCheckUnderMap = v end)
+        curY = curY + spacing
+
+        createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+            "Avoid Border-Blocked",
+            function() return Config.TriggerCheckBorder end,
+            function(v) Config.TriggerCheckBorder = v end)
+        curY = curY + spacing
+
+        createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+            "Avoid Shielded",
+            function() return Config.TriggerCheckShield end,
+            function(v) Config.TriggerCheckShield = v end)
+        curY = curY + spacing
+    end
+
+    -- ── COMBAT section ── (visible in BOTH modes)
+    -- Auto Shockwave runs in both modes when on. Dynamic Range affects
+    -- both the trigger bot's effective range AND the ESP color bands.
+    createSeparator(main, curY); curY = curY + 6
+    createSectionLabel(main, curY, "Combat"); curY = curY + 18
+
+    createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+        "Auto Shockwave",
+        function() return Config.ShockwaveBot end,
+        function(v) Config.ShockwaveBot = v end)
+    curY = curY + spacing
+
+    createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
+        "Dynamic Range",
+        function() return Config.DynamicRange end,
+        function(v) Config.DynamicRange = v end)
+    curY = curY + spacing
+
     -- ── VISUALS section ──
+    createSeparator(main, curY); curY = curY + 6
     createSectionLabel(main, curY, "Visuals"); curY = curY + 18
 
     createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
-        "FOV Circle", function() return FOV.Visible end, function(v) FOV.Visible = v end)
+        "FOV Circle",
+        function()
+            -- While trigger bot suppresses FOV, the toggle should reflect
+            -- the saved-intent value, not the live (forced-off) state.
+            if Config.TriggerBot and State.SavedFOVVisible ~= nil then
+                return State.SavedFOVVisible
+            end
+            return FOV.Visible
+        end,
+        function(v)
+            -- If trigger bot is currently suppressing FOV, store the
+            -- new intent in SavedFOVVisible so it'll apply on bot-off,
+            -- but keep FOV invisible right now. Otherwise apply directly.
+            if Config.TriggerBot then
+                State.SavedFOVVisible = v
+                FOV.Visible = false
+            else
+                FOV.Visible = v
+            end
+        end)
     curY = curY + spacing
 
     createToggleButton(main, UDim2.fromOffset(4, curY), UDim2.new(1, -8, 0, 28),
@@ -1737,10 +2813,31 @@ local function init()
     trackPlayers()
     UserInputService.InputBegan:Connect(onInputBegan)
     UserInputService.InputEnded:Connect(onInputEnded)
+    tb_updateLMBBind()   -- bind/unbind based on current config (may have been loaded from prefs)
     local lastUpdate = { esp = 0, hover = 0, ff = 0, arrows = 0, radar = 0 }
     RunService.RenderStepped:Connect(function()
         -- Cursor follows every frame (feels bad if it doesn't).
         FOV.Position = UserInputService:GetMouseLocation()
+
+        -- Trigger bot runs every frame so we don't miss tight windows
+        -- when target briefly enters range. Internal cooldown enforces
+        -- the actual fire rate.
+        if Config.TriggerBot then
+            local ok, reason, plr, part = tb_canFireNow()
+            State.TriggerLastReason = reason
+            if ok and plr and part then tb_fire(plr, part) end
+        else
+            State.TriggerLastReason = "DISABLED"
+        end
+
+        -- Auto shockwave runs independently (cheap AOE with its own cooldown)
+        if Config.ShockwaveBot then
+            local ok, reason = tb_canShockwave()
+            State.ShockLastReason = reason
+            if ok then tb_fireShockwave() end
+        else
+            State.ShockLastReason = "DISABLED"
+        end
 
         local now      = tick()
         local interval = 1 / math.max(Config.UPDATE_RATE or 30, 1)
@@ -1772,7 +2869,17 @@ local function init()
         if Config.ShowHighlight and not State.TelepathyTogOn
            and now - lastUpdate.hover >= espInt then
             lastUpdate.hover = now
-            local p, _ = nearestToCursor()
+            -- In hold mode while LMB is held, force the highlight to stay
+            -- on the locked target so it can't visually switch as the
+            -- cursor drifts off. Recording mode + idle hold mode use the
+            -- normal cursor-tracking pick.
+            local p
+            if Config.TriggerBot and Config.TriggerMode == "hold"
+               and State.LMBHeld and State.LockedTarget then
+                p = State.LockedTarget
+            else
+                p = (nearestToCursor())
+            end
             if p ~= State.HoverPlayer then
                 State.HoverPlayer = p
                 local hl = State.HoverHighlight
