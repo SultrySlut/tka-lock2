@@ -2103,6 +2103,14 @@ end
 -- Effective range for the current frame, accounting for closing/separating
 -- velocity vs target + replication lag + ping. If DynamicRange is off,
 -- returns the static base range.
+--
+-- Sign convention (matches alt bot's compensation):
+--   The server has a lagged copy of OUR position (~ replication tick + half
+--   ping behind). If we're moving toward the target at velocity V, the
+--   server's stale copy is V*latency studs further from the target than we
+--   actually are. The server's distance check is therefore LARGER than the
+--   client distance, so to land inside its real range we need our client
+--   distance < TRIGGER_RANGE - V*latency. Closing → tighter, fleeing → looser.
 local function tb_getSafeRange(myPos, targetPos)
     if not Config.DynamicRange then return Config.TRIGGER_RANGE end
     local myRoot = tb_getRoot(LocalPlayer)
@@ -2114,10 +2122,12 @@ local function tb_getSafeRange(myPos, targetPos)
     local adjust  = 0
     if toDist > 0.01 then
         local unit = to / toDist
-        local velToward = myVel:Dot(unit)
+        local velToward = myVel:Dot(unit)   -- positive = closing on target
         adjust = velToward * latency
     end
-    return math.max(Config.TRIGGER_RANGE + adjust, Config.TRIGGER_RANGE_FLOOR)
+    -- SUBTRACT the adjustment: positive (closing) → smaller safeRange,
+    -- negative (fleeing) → larger safeRange. Matches alt bot exactly.
+    return math.max(Config.TRIGGER_RANGE - adjust, Config.TRIGGER_RANGE_FLOOR)
 end
 
 -- Fightability gate. Reuses nearestToCursor's whitelist + LOS, so we
