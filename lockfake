@@ -59,7 +59,7 @@ local Config = {
     -- Proximity Force Field (invisible bubble around YOU; hex patches appear
     -- only where a player is, colored by ESP zone, flashes on zone crossing)
     ShowForceField    = false,
-    FF_BUBBLE_RADIUS  = 30,    -- studs: radius of the invisible personal bubble
+    FF_BUBBLE_RADIUS  = 75,    -- studs: radius of the invisible personal bubble
     FF_PATCH_SIZE     = 6,     -- mesh scale for hex patches
     FF_MIN_TRANS      = 0.04,  -- transparency at point-blank (lower = more solid)
     FF_FLASH_SECONDS  = 0.45,  -- duration of the crossing flash
